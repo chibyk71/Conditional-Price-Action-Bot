@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "conditional-price-action-bot"
+version = "1.0.0"
+description = "Conditional Price-Action Bot V1.0 — Deriv synthetic market data, observations, conditions, signals"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "websockets>=12.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+cpab = "cpab.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "live: optional live API smoke tests (require network)",
+    "asyncio: asyncio tests",
+]
