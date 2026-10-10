@@ -11,6 +11,7 @@ from cpab.market.aggregation import aggregate_from_1m
 from cpab.market.cache import CandleCache
 from cpab.market.readiness import ReadinessManager
 from cpab.market.validation import (
+    has_gap_or_order_issues,
     mark_closed_by_lag,
     normalize_provider_candle,
     validate_candle_sequence,
@@ -69,6 +70,15 @@ class MarketDataService:
     def completed_candles(self, symbol: str, timeframe: str) -> list[Candle]:
         return self.get_cache(symbol, timeframe).completed()
 
+    def _min_completed_required(self) -> int:
+        """Completed bars required for READY (accounts for confirm lag on the edge)."""
+        return max(1, self.min_candles - self.confirm_lag_bars)
+
+    def _series_ok(self, cache: CandleCache) -> bool:
+        """Strict readiness: contiguous completed history at required depth, no quarantine."""
+        need = self._min_completed_required()
+        return cache.is_series_healthy(need)
+
     async def initialize(self) -> None:
         """Fetch independent history for every required symbol/timeframe."""
         logger.info(
@@ -91,40 +101,50 @@ class MarketDataService:
                         if c:
                             candles.append(c)
                     candles.sort(key=lambda x: x.epoch)
-                    vr = validate_candle_sequence(candles, expected_step=gran, allow_gaps=True)
+                    # Strict: gaps/duplicates/out-of-order disqualify readiness.
+                    vr = validate_candle_sequence(candles, expected_step=gran, allow_gaps=False)
+                    if has_gap_or_order_issues(vr):
+                        logger.error(
+                            "History continuity failure %s/%s issues=%s",
+                            sym,
+                            name,
+                            [(i.code, i.message) for i in vr.issues],
+                        )
+                        self.readiness.set_series(sym, name, False, "history gaps or order issues")
+                        failures += 1
+                        continue
                     if len(vr.candles) < self.min_candles:
                         logger.error(
-                            "Insufficient history %s/%s got=%s need=%s issues=%s",
+                            "Insufficient history %s/%s got=%s need=%s",
                             sym,
                             name,
                             len(vr.candles),
                             self.min_candles,
-                            [i.code for i in vr.issues],
                         )
                         self.readiness.set_series(sym, name, False, "insufficient history")
                         failures += 1
                         continue
-                    # Mark closed/forming by lag
                     marked = mark_closed_by_lag(
                         vr.candles, gran, server_time, self.confirm_lag_bars
                     )
                     cache = self.get_cache(sym, name)
                     cache.clear()
                     cache.upsert_many(marked)
+                    ok = self._series_ok(cache)
                     completed_n = len(cache.completed())
-                    ok = completed_n >= self.min_candles - self.confirm_lag_bars - 2
                     self.readiness.set_series(
                         sym,
                         name,
                         ok,
-                        f"history loaded completed={completed_n}",
+                        f"history loaded completed={completed_n} contiguous={ok}",
                     )
                     logger.info(
-                        "History ready %s/%s total=%s completed=%s",
+                        "History ready %s/%s total=%s completed=%s ok=%s",
                         sym,
                         name,
                         len(cache),
                         completed_n,
+                        ok,
                     )
                 except Exception as e:
                     logger.exception("History init failed %s/%s: %s", sym, name, e)
@@ -162,21 +182,32 @@ class MarketDataService:
                 )
                 cache_1m = self.get_cache(sym, self._1m_name)
                 counts = cache_1m.upsert_many(marked)
-                if counts.get("revised"):
+                if counts.get("revised") or counts.get("revised_confirmed"):
                     logger.info(
-                        "Poll reconcile %s/1m inserted=%s revised=%s unchanged=%s",
+                        "Poll reconcile %s/1m inserted=%s revised=%s revised_confirmed=%s unchanged=%s",
                         sym,
-                        counts["inserted"],
-                        counts["revised"],
-                        counts["unchanged"],
+                        counts.get("inserted", 0),
+                        counts.get("revised", 0),
+                        counts.get("revised_confirmed", 0),
+                        counts.get("unchanged", 0),
                     )
-                # Validate completed length
-                ok = cache_1m.has_min_completed(max(10, self.min_candles // 10))
-                self.readiness.set_series(
-                    sym, self._1m_name, ok, f"poll completed={len(cache_1m.completed())}"
-                )
+                if counts.get("revised_confirmed", 0) > 0:
+                    self.readiness.set_series(
+                        sym,
+                        self._1m_name,
+                        False,
+                        f"confirmed candle revised quarantine={sorted(cache_1m.quarantine_epochs)}",
+                    )
+                else:
+                    ok = self._series_ok(cache_1m)
+                    self.readiness.set_series(
+                        sym,
+                        self._1m_name,
+                        ok,
+                        f"poll completed={len(cache_1m.completed())} contiguous={ok}",
+                    )
 
-                # Rebuild HTF from local 1m completed
+                # Rebuild HTF from local 1m completed (excludes quarantined)
                 one_min = cache_1m.completed()
                 for tf in self.timeframes:
                     name = tf["name"]
@@ -186,16 +217,26 @@ class MarketDataService:
                     htf = aggregate_from_1m(
                         one_min, gran, name, sym, require_complete=True
                     )
-                    # Also merge any recent provider HTF if we poll them separately
                     htf_cache = self.get_cache(sym, name)
-                    # Upsert aggregated; keep provider history for depth
+                    htf_counts = {"revised_confirmed": 0}
                     for c in htf:
-                        htf_cache.upsert(c)
-                    # Ensure HTF still has enough completed
-                    htf_ok = htf_cache.has_min_completed(max(5, self.min_candles // 20))
-                    self.readiness.set_series(
-                        sym, name, htf_ok, f"htf completed={len(htf_cache.completed())}"
-                    )
+                        status = htf_cache.upsert(c)
+                        htf_counts[status] = htf_counts.get(status, 0) + 1
+                    if htf_counts.get("revised_confirmed", 0) > 0:
+                        self.readiness.set_series(
+                            sym,
+                            name,
+                            False,
+                            "confirmed HTF candle revised",
+                        )
+                    else:
+                        htf_ok = self._series_ok(htf_cache)
+                        self.readiness.set_series(
+                            sym,
+                            name,
+                            htf_ok,
+                            f"htf completed={len(htf_cache.completed())} contiguous={htf_ok}",
+                        )
             except Exception as e:
                 logger.error("Poll failed for %s: %s", sym, e)
                 for tf in self.timeframes:
@@ -225,10 +266,15 @@ class MarketDataService:
                     marked = mark_closed_by_lag(
                         candles, gran, server_time, self.confirm_lag_bars
                     )
-                    counts = self.get_cache(sym, name).upsert_many(marked)
-                    logger.debug("Poll %s/%s %s", sym, name, counts)
-                    ok = self.get_cache(sym, name).has_min_completed(5)
-                    self.readiness.set_series(sym, name, ok, "poll")
+                    cache = self.get_cache(sym, name)
+                    counts = cache.upsert_many(marked)
+                    if counts.get("revised_confirmed", 0) > 0:
+                        self.readiness.set_series(
+                            sym, name, False, "confirmed candle revised"
+                        )
+                    else:
+                        ok = self._series_ok(cache)
+                        self.readiness.set_series(sym, name, ok, f"poll contiguous={ok}")
                 except Exception as e:
                     logger.error("Poll %s/%s failed: %s", sym, name, e)
                     self.readiness.set_series(sym, name, False, str(e))
