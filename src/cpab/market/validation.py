@@ -139,8 +139,6 @@ def validate_candle_sequence(
     ok = len(valid) > 0 and not any(
         i.code in ("EMPTY", "INVALID_TYPE") for i in issues
     )
-    # Sequence is usable if we have valid candles; gaps/duplicates are issues but not hard fail
-    # unless nothing remains.
     return CandleValidationResult(ok=len(valid) > 0, candles=valid, issues=issues)
 
 
@@ -175,3 +173,8 @@ def mark_closed_by_lag(
                 )
             )
     return out
+
+
+def has_gap_or_order_issues(result: CandleValidationResult) -> bool:
+    """True if sequence has gaps, out-of-order, or duplicate issues."""
+    return any(i.code in ("GAP", "OUT_OF_ORDER", "DUPLICATE", "EMPTY") for i in result.issues)
