@@ -100,8 +100,8 @@ class MarketDataService:
                         c = normalize_provider_candle(r, sym, name, is_closed=True, source="provider")
                         if c:
                             candles.append(c)
-                    candles.sort(key=lambda x: x.epoch)
-                    # Strict: gaps/duplicates/out-of-order disqualify readiness.
+                    # Validate provider order first — do not silently reorder
+                    # before integrity checks (OUT_OF_ORDER must be visible).
                     vr = validate_candle_sequence(candles, expected_step=gran, allow_gaps=False)
                     if has_gap_or_order_issues(vr):
                         logger.error(
@@ -124,8 +124,10 @@ class MarketDataService:
                         self.readiness.set_series(sym, name, False, "insufficient history")
                         failures += 1
                         continue
+                    # Sort only after successful validation (stable cache order).
+                    ordered = sorted(vr.candles, key=lambda x: x.epoch)
                     marked = mark_closed_by_lag(
-                        vr.candles, gran, server_time, self.confirm_lag_bars
+                        ordered, gran, server_time, self.confirm_lag_bars
                     )
                     cache = self.get_cache(sym, name)
                     cache.clear()
