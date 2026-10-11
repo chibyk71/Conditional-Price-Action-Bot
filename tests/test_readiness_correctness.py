@@ -255,3 +255,67 @@ async def test_confirmed_revision_during_poll_degrades_readiness():
     cache = svc.get_cache("R_100", "1m")
     assert cache.confirmed_revision_count >= 1
     assert len(cache.quarantine_epochs) >= 1
+
+
+# ---------------------------------------------------------------------------
+# 4. Out-of-order provider response must not be silently reordered into READY
+# ---------------------------------------------------------------------------
+
+class OutOfOrderAdapter(MarketDataAdapter):
+    """Returns contiguous OHLC bars but epochs are shuffled (descending)."""
+
+    def __init__(self, n: int = 50, gran: int = 60):
+        self.n = n
+        self.gran = gran
+        self._connected = False
+
+    async def connect(self):
+        self._connected = True
+
+    async def close(self):
+        self._connected = False
+
+    @property
+    def connected(self):
+        return self._connected
+
+    async def fetch_candles(self, symbol, granularity, count, *, end="latest"):
+        base = 1_700_000_000
+        base = base - (base % granularity)
+        out = []
+        price = 100.0
+        for i in range(count):
+            o = price
+            c = price + 0.1
+            out.append(
+                {
+                    "epoch": base + i * granularity,
+                    "open": o,
+                    "high": c + 0.05,
+                    "low": o - 0.05,
+                    "close": c,
+                }
+            )
+            price = c
+        # Reverse so provider order is descending — integrity violation
+        out.reverse()
+        return out
+
+
+@pytest.mark.asyncio
+async def test_out_of_order_history_does_not_become_ready():
+    adapter = OutOfOrderAdapter(n=50, gran=60)
+    rm = ReadinessManager()
+    svc = MarketDataService(
+        adapter,
+        symbols=["R_100"],
+        timeframes=[{"name": "1m", "granularity": 60}],
+        min_candles=50,
+        readiness=rm,
+        confirm_lag_bars=0,
+    )
+    await adapter.connect()
+    await svc.initialize()
+    assert rm.state != ReadinessState.READY
+    assert not rm.can_evaluate()
+    assert rm.snapshot()["series"]["R_100/1m"] is False
