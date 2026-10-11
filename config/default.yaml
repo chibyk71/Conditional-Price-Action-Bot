@@ -1,0 +1,49 @@
+# Conditional Price-Action Bot V1.0 — default configuration
+
+deriv:
+  # Prefer general v3 when reachable; Options public is the verified fallback
+  # from diagnostics (artifacts/diagnostics/DERIV_CANDLE_API_VALIDATION_REPORT.md).
+  endpoint: "wss://api.derivws.com/trading/v1/options/ws/public"
+  app_id: "1089"
+  request_timeout_sec: 15
+  max_connect_retries: 5
+  reconnect_backoff_sec: 2.0
+  poll_interval_sec: 8.0
+  poll_lookback_bars: 5
+  # Bars older than this lag past epoch+granularity are treated as closed.
+  confirm_lag_bars: 1
+
+symbols:
+  - R_100
+  - R_75
+
+timeframes:
+  # granularity in seconds
+  - name: "1m"
+    granularity: 60
+  - name: "5m"
+    granularity: 300
+
+history:
+  min_candles: 300
+
+readiness:
+  # Block evaluation until every required (symbol, timeframe) series is ready
+  required_history: 300
+
+logging:
+  level: INFO
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+# Provisional example condition (not an approved trading strategy).
+# Detects a simple bullish engulfing observation on 1m and emits a signal
+# when the observation is present on a completed candle.
+conditions:
+  - id: "example_bullish_engulfing_1m"
+    symbol: "R_100"
+    timeframe: "1m"
+    enabled: true
+    # Requires observation type produced by the provisional detector
+    require_observations:
+      - type: "bullish_engulfing"
+        min_count: 1
