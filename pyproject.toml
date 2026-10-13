@@ -4,13 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "conditional-price-action-bot"
-version = "1.0.0"
-description = "Conditional Price-Action Bot V1.0 — Deriv synthetic market data, observations, conditions, signals"
+version = "1.1.0"
+description = "Conditional Price-Action Bot — Deriv synthetic market data, observations, conditions, signals"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "websockets>=12.0",
     "pyyaml>=6.0",
+    "numpy>=1.24",
+    "TA-Lib>=0.4.28",
 ]
 
 [project.optional-dependencies]
