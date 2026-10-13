@@ -102,14 +102,18 @@ def candle_direction(candle: Candle) -> str:
     return "neutral"
 
 
+def _validate_doji_threshold(threshold: float) -> None:
+    if not (0.0 <= threshold <= 1.0):
+        raise ValueError(f"doji threshold must be in [0.0, 1.0], got {threshold!r}")
+
+
 def is_doji(candle: Candle, threshold: float = 0.10) -> Optional[bool]:
     """
     True when body-to-range ratio <= threshold.
     threshold must be in [0.0, 1.0]; otherwise ValueError.
     Returns None for zero-range candles (ratio unavailable).
     """
-    if not (0.0 <= threshold <= 1.0):
-        raise ValueError(f"doji threshold must be in [0.0, 1.0], got {threshold!r}")
+    _validate_doji_threshold(threshold)
     ratio = body_ratio(candle)
     if ratio is None:
         return None
@@ -119,8 +123,9 @@ def is_doji(candle: Candle, threshold: float = 0.10) -> Optional[bool]:
 def analyze_candle(candle: Candle, doji_threshold: float = 0.10) -> CandleAnatomy:
     """
     Full anatomy snapshot. Prefer this when multiple measurements are needed.
-    doji_threshold is validated by is_doji.
+    doji_threshold is always validated (including for zero-range candles).
     """
+    _validate_doji_threshold(doji_threshold)
     r = candle_range(candle)
     body = real_body(candle)
     uw = upper_wick(candle)
@@ -132,10 +137,6 @@ def analyze_candle(candle: Candle, doji_threshold: float = 0.10) -> CandleAnatom
         br = body / r
         uwr = uw / r
         lwr = lw / r
-        if not (0.0 <= doji_threshold <= 1.0):
-            raise ValueError(
-                f"doji threshold must be in [0.0, 1.0], got {doji_threshold!r}"
-            )
         doji = br <= doji_threshold
     return CandleAnatomy(
         range=r,
