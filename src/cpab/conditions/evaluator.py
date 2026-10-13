@@ -28,7 +28,9 @@ class ConditionEvaluator:
       2. Requirement matching:
          Each require_observations entry is satisfied by causally available
          observations of the requested type (not by confirmation-bar equality
-         alone).
+         alone). When selecting the supporting set (min_count), activation
+         observations at T are preferred over older eligible matches so a
+         new same-type fact on the current bar can activate the condition.
 
       3. Condition activation (prevents passive re-fire):
          When T is set, the condition is met only if every requirement is
@@ -91,6 +93,18 @@ class ConditionEvaluator:
                     for o in candidates
                     if o.is_eligible_at(T, allow_developing=allow_developing)
                 ]
+                # Prefer activation observations at T so a new same-type fact on
+                # the current bar is selected over an older eligible prior when
+                # only min_count slots are taken into the supporting set.
+                matches = sorted(
+                    matches,
+                    key=lambda o: (
+                        0 if ConditionEvaluator._is_activation_observation(o, T) else 1,
+                        o.effective_confirmed_at() is None,
+                        o.effective_confirmed_at() or 0,
+                        o.id,
+                    ),
+                )
             else:
                 matches = [
                     o
