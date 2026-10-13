@@ -9,6 +9,12 @@ TA-Lib is a required dependency. There is no silent fallback to hand-written
 detectors. Forming candles are rejected at the adapter boundary. Insufficient
 history yields an explicit non-emission outcome (no Observation). A raw zero
 result means no pattern observation is emitted.
+
+Minimum history is derived from TA-Lib's own lookback for each pattern:
+  min_history = Function(pattern).lookback + 1
+That is the number of completed candles required before the latest bar can be
+a valid (non-unstable-period) evaluation of the pattern. Unsupported pattern
+names are rejected rather than assigned an arbitrary default.
 """
 
 from __future__ import annotations
@@ -25,17 +31,7 @@ from cpab.models import Candle, Observation
 
 logger = get_logger("cpab.detectors.talib_adapter")
 
-_PATTERN_MIN_HISTORY: dict[str, int] = {
-    "CDLENGULFING": 2,
-    "CDLDOJI": 1,
-    "CDLHAMMER": 1,
-    "CDLSHOOTINGSTAR": 1,
-    "CDLHARAMI": 2,
-    "CDLPIERCING": 2,
-    "CDLMORNINGSTAR": 3,
-    "CDLEVENINGSTAR": 3,
-}
-
+# Stable aliases → TA-Lib function name (1:1). Only these aliases are accepted.
 _PATTERN_ALIASES: dict[str, str] = {
     "engulfing": "CDLENGULFING",
     "doji": "CDLDOJI",
@@ -46,6 +42,10 @@ _PATTERN_ALIASES: dict[str, str] = {
     "morning_star": "CDLMORNINGSTAR",
     "evening_star": "CDLEVENINGSTAR",
 }
+
+# Supported CDL function names (explicit allow-list). Lookbacks are NOT hard-coded
+# here; they are read from TA-Lib via Function(name).lookback at runtime.
+_SUPPORTED_PATTERNS: frozenset[str] = frozenset(_PATTERN_ALIASES.values())
 
 
 class AdapterOutcomeKind(str, Enum):
@@ -66,29 +66,55 @@ class AdapterRawResult:
     detail: Optional[str] = None
 
 
-def _resolve_pattern_name(pattern: str) -> str:
+def resolve_pattern_name(pattern: str) -> str:
+    """
+    Resolve alias or CDL name to a canonical TA-Lib function name.
+    Raises ValueError for unsupported patterns (no arbitrary default).
+    """
     key = pattern.strip().upper()
-    if key.startswith("CDL"):
+    if key in _SUPPORTED_PATTERNS:
         return key
     alias = _PATTERN_ALIASES.get(pattern.strip().lower())
-    if alias:
+    if alias is not None:
         return alias
-    return f"CDL{key}"
+    cdl = f"CDL{key}" if not key.startswith("CDL") else key
+    if cdl in _SUPPORTED_PATTERNS:
+        return cdl
+    raise ValueError(
+        f"Unsupported TA-Lib pattern: {pattern!r}. "
+        f"Supported: {sorted(_SUPPORTED_PATTERNS)}"
+    )
+
+
+def talib_lookback(pattern: str) -> int:
+    """
+    Computational lookback from TA-Lib itself (Function.lookback).
+    This is the number of leading bars in the unstable period for the pattern.
+    """
+    from talib.abstract import Function
+
+    name = resolve_pattern_name(pattern)
+    return int(Function(name).lookback)
+
+
+def min_history_for(pattern: str) -> int:
+    """
+    Minimum completed candles required to evaluate the *latest* bar.
+
+    Derived from TA-Lib: lookback + 1 (lookback preceding bars + the signal bar).
+    Raises ValueError for unsupported patterns.
+    """
+    return talib_lookback(pattern) + 1
 
 
 def _get_talib_fn(pattern: str) -> Callable[..., np.ndarray]:
     import talib
 
-    name = _resolve_pattern_name(pattern)
+    name = resolve_pattern_name(pattern)
     fn = getattr(talib, name, None)
     if fn is None or not callable(fn):
-        raise ValueError(f"Unknown or unsupported TA-Lib pattern: {pattern!r} (resolved {name!r})")
+        raise ValueError(f"TA-Lib function not available: {name!r}")
     return fn
-
-
-def min_history_for(pattern: str) -> int:
-    name = _resolve_pattern_name(pattern)
-    return _PATTERN_MIN_HISTORY.get(name, 3)
 
 
 def candles_to_ohlc_arrays(candles: list[Candle]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -105,25 +131,49 @@ def candles_to_ohlc_arrays(candles: list[Candle]) -> tuple[np.ndarray, np.ndarra
     return o, h, l, c
 
 
+def evaluate_raw_series(candles: list[Candle], pattern: str) -> np.ndarray:
+    """
+    Full TA-Lib integer array for the series (one value per bar).
+    Used by causality tests; production detect() uses evaluate_raw (latest only).
+    Raises ValueError for unsupported patterns.
+    """
+    name = resolve_pattern_name(pattern)
+    if any(not c.is_closed for c in candles):
+        raise ValueError("Forming candles are not eligible for pattern evaluation")
+    fn = _get_talib_fn(name)
+    o, h, l, c = candles_to_ohlc_arrays(candles)
+    arr = fn(o, h, l, c)
+    return np.asarray(arr, dtype=np.int64)
+
+
 def evaluate_raw(candles: list[Candle], pattern: str) -> AdapterRawResult:
-    resolved = _resolve_pattern_name(pattern)
+    try:
+        resolved = resolve_pattern_name(pattern)
+    except ValueError as exc:
+        return AdapterRawResult(
+            kind=AdapterOutcomeKind.EXECUTION_FAILURE,
+            pattern=pattern.strip().upper(),
+            message=str(exc),
+            detail=type(exc).__name__,
+        )
+
     if any(not c.is_closed for c in candles):
         return AdapterRawResult(
             kind=AdapterOutcomeKind.FORMING_CANDLE,
             pattern=resolved,
             message="Forming candles are not eligible for pattern evaluation",
         )
+
     need = min_history_for(resolved)
     if len(candles) < need:
         return AdapterRawResult(
             kind=AdapterOutcomeKind.INSUFFICIENT_HISTORY,
             pattern=resolved,
-            message=f"Need at least {need} completed candles, got {len(candles)}",
+            message=f"Need at least {need} completed candles (TA-Lib lookback+1), got {len(candles)}",
         )
+
     try:
-        fn = _get_talib_fn(resolved)
-        o, h, l, c = candles_to_ohlc_arrays(candles)
-        arr = fn(o, h, l, c)
+        arr = evaluate_raw_series(candles, resolved)
         if arr is None or len(arr) == 0:
             return AdapterRawResult(
                 kind=AdapterOutcomeKind.EXECUTION_FAILURE,
@@ -214,7 +264,7 @@ class TalibPatternDetector(PriceActionDetector):
         detector_id: Optional[str] = None,
         detector_config_id: Optional[str] = None,
     ) -> None:
-        self._pattern = _resolve_pattern_name(pattern)
+        self._pattern = resolve_pattern_name(pattern)
         self._detector_id = detector_id or f"talib:{self._pattern.lower()}"
         self._detector_config_id = detector_config_id
 
