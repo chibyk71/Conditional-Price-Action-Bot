@@ -11,6 +11,8 @@ Definition (explicit):
     - close_i >= open_{i-1}
   Bearish is the mirror.
 Only completed candles are considered.
+
+For engulging, event_time == confirmed_at == candle_epoch (the confirming bar).
 """
 
 from __future__ import annotations
@@ -43,18 +45,25 @@ class EngulfingDetector(PriceActionDetector):
         curr_bear = curr.close < curr.open
 
         if prev_bear and curr_bull and curr.open <= prev.close and curr.close >= prev.open:
+            meta = {
+                "prev_epoch": prev.epoch,
+                "prev_ohlc": prev.ohlc_tuple(),
+                "curr_ohlc": curr.ohlc_tuple(),
+                "detector": self.name,
+                "provisional": True,
+            }
             obs = Observation.create(
                 type="bullish_engulfing",
                 symbol=curr.symbol,
                 timeframe=curr.timeframe,
                 candle_epoch=curr.epoch,
-                metadata={
-                    "prev_epoch": prev.epoch,
-                    "prev_ohlc": prev.ohlc_tuple(),
-                    "curr_ohlc": curr.ohlc_tuple(),
-                    "detector": self.name,
-                    "provisional": True,
-                },
+                metadata=meta,
+                event_time=curr.epoch,
+                confirmed_at=curr.epoch,
+                developing=False,
+                direction="bullish",
+                detector_id=self.name,
+                payload=meta,
             )
             out.append(obs)
             logger.debug(
@@ -64,18 +73,25 @@ class EngulfingDetector(PriceActionDetector):
                 curr.epoch,
             )
         elif prev_bull and curr_bear and curr.open >= prev.close and curr.close <= prev.open:
+            meta = {
+                "prev_epoch": prev.epoch,
+                "prev_ohlc": prev.ohlc_tuple(),
+                "curr_ohlc": curr.ohlc_tuple(),
+                "detector": self.name,
+                "provisional": True,
+            }
             obs = Observation.create(
                 type="bearish_engulfing",
                 symbol=curr.symbol,
                 timeframe=curr.timeframe,
                 candle_epoch=curr.epoch,
-                metadata={
-                    "prev_epoch": prev.epoch,
-                    "prev_ohlc": prev.ohlc_tuple(),
-                    "curr_ohlc": curr.ohlc_tuple(),
-                    "detector": self.name,
-                    "provisional": True,
-                },
+                metadata=meta,
+                event_time=curr.epoch,
+                confirmed_at=curr.epoch,
+                developing=False,
+                direction="bearish",
+                detector_id=self.name,
+                payload=meta,
             )
             out.append(obs)
             logger.debug(
