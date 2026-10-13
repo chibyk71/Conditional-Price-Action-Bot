@@ -89,6 +89,7 @@ class Observation:
     Identity (Phase 0):
       - When detector_id is set, Observation.create assigns a stable event id so
         repeated detect() on the same logical event is idempotent in the store.
+      - detector_config_id is part of that identity so configured instances remain distinct.
     """
 
     id: str
@@ -180,6 +181,7 @@ class Observation:
         candle_epoch: int,
         *,
         detector_id: Optional[str] = None,
+        detector_config_id: Optional[str] = None,
         direction: Optional[str] = None,
         developing: bool = False,
         variant: Optional[str] = None,
@@ -191,8 +193,11 @@ class Observation:
 
         Used so repeated detect() calls on the same bar produce the same
         observation id and ObservationStore.accept is idempotent for that event.
-        Distinct legitimate events (different type/bar/detector/direction/etc.)
+        Distinct legitimate events (different type/bar/detector/config/direction/etc.)
         keep distinct ids.
+
+        detector_config_id is part of the identity so two configured instances of
+        the same detector type can emit distinct observations on the same bar.
         """
         et = event_time if event_time is not None else candle_epoch
         if developing:
@@ -209,6 +214,7 @@ class Observation:
             f"e{et}",
             conf_part,
             detector_id or "",
+            detector_config_id or "",
             direction or "",
             variant or "",
         ]
@@ -241,7 +247,8 @@ class Observation:
 
         Id policy:
           - Explicit id= wins.
-          - Else if detector_id is set, use stable_event_id (idempotent re-emissions).
+          - Else if detector_id is set, use stable_event_id (idempotent re-emissions),
+            including detector_config_id so configured instances stay distinct.
           - Else random UUID (ad-hoc / synthetic observations in tests).
         """
         meta = dict(metadata or {})
@@ -270,6 +277,7 @@ class Observation:
                 timeframe,
                 candle_epoch,
                 detector_id=detector_id,
+                detector_config_id=detector_config_id,
                 direction=direction,
                 developing=developing,
                 variant=variant,
