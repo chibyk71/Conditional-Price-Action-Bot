@@ -44,7 +44,9 @@ At market evaluation time `T`:
 
 Each `require_observations` entry is satisfied by causally available
 observations of the requested type. Matching does **not** require every
-component to have `confirmed_at == T`.
+component to have `confirmed_at == T`. When selecting the supporting set
+(`min_count`), activation observations at `T` are preferred over older eligible
+matches so a new same-type fact on the current bar can activate the condition.
 
 ### Condition activation (signal semantics)
 
@@ -67,12 +69,21 @@ confirms: availability alone is not enough.
 `ConditionEngine` still tracks emitted `(condition_id, candle_epoch)` pairs so
 the same evaluation event is not emitted twice within a process.
 
+### Observation identity (idempotent emissions)
+
+- `Observation.create` uses a **stable event id** when `detector_id` is set
+  (`type|symbol|timeframe|candle_epoch|…`), so repeated `detect()` calls on the
+  same logical event produce the same id.
+- Without `detector_id`, a random UUID is used (synthetic/test observations).
+- Explicit `id=` overrides both.
+
 ### Observation retention (live engine)
 
 `ConditionEngine` holds a bounded `ObservationStore`:
 
 - Detector emissions from each `evaluate_once` are accepted into the store
-  (deduped by observation id; first write wins).
+  (deduped by observation id; first write wins). Stable ids make re-emission
+  of the same logical event idempotent and prevent store pollution.
 - Evaluation uses **all retained** observations for the series, not only the
   current cycle's detector output. This is required for multi-component setups
   whose components confirm on different bars.
