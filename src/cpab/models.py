@@ -85,6 +85,10 @@ class Observation:
       - The dataclass is frozen (top-level fields cannot be reassigned).
       - metadata and payload remain plain dicts; nested values are not deeply
         frozen. Consumers must not mutate them after construction.
+
+    Identity (Phase 0):
+      - When detector_id is set, Observation.create assigns a stable event id so
+        repeated detect() on the same logical event is idempotent in the store.
     """
 
     id: str
@@ -138,7 +142,7 @@ class Observation:
         return None
 
     def confirmation_is_detected_at_fallback(self) -> bool:
-        """True when effective confirmation used detected_at (not a market time)."""
+        """True when effective_confirmed_at came from detected_at, not market time."""
         if self.developing or self.confirmed_at is not None:
             return False
         if self.candle_epoch:
@@ -146,32 +150,79 @@ class Observation:
         return bool(self.detected_at)
 
     def is_developing(self) -> bool:
-        return self.developing
+        return bool(self.developing)
 
     def is_confirmed(self) -> bool:
         return self.effective_confirmed_at() is not None
 
-    def is_eligible_at(self, T: int, *, allow_developing: bool = False) -> bool:
+    def is_eligible_at(self, market_time: int, *, allow_developing: bool = False) -> bool:
         """
-        Causal availability at market time T.
+        Causal availability at market evaluation time T.
+        Confirmed obs eligible iff effective_confirmed_at <= T.
+        Developing obs only if allow_developing is True (and still not treated as confirmed).
 
-        Confirmed: eligible iff effective_confirmed_at() <= T.
-        Developing: only if allow_developing is True (requirement opt-in).
+        Note: condition *triggering* additionally requires binding to the evaluation
+        bar (see ConditionEvaluator._binds_to_evaluation_bar). Availability alone
+        does not imply a signal on every subsequent candle.
         """
         if self.is_developing():
             return allow_developing
         conf = self.effective_confirmed_at()
         if conf is None:
             return False
-        return conf <= T
+        return conf <= market_time
 
     @staticmethod
-    def create(
-        *,
+    def stable_event_id(
         type: str,
         symbol: str,
         timeframe: str,
         candle_epoch: int,
+        *,
+        detector_id: Optional[str] = None,
+        direction: Optional[str] = None,
+        developing: bool = False,
+        variant: Optional[str] = None,
+        event_time: Optional[int] = None,
+        confirmed_at: Optional[int] = None,
+    ) -> str:
+        """
+        Deterministic identity for a logical detector event.
+
+        Used so repeated detect() calls on the same bar produce the same
+        observation id and ObservationStore.accept is idempotent for that event.
+        Distinct legitimate events (different type/bar/detector/direction/etc.)
+        keep distinct ids.
+        """
+        et = event_time if event_time is not None else candle_epoch
+        if developing:
+            conf_part = "dev"
+        elif confirmed_at is not None:
+            conf_part = f"c{confirmed_at}"
+        else:
+            conf_part = f"c{candle_epoch}"
+        parts = [
+            type,
+            symbol,
+            timeframe,
+            str(candle_epoch),
+            f"e{et}",
+            conf_part,
+            detector_id or "",
+            direction or "",
+            variant or "",
+        ]
+        return "|".join(parts)
+
+    @staticmethod
+    def create(
+        type: str,
+        symbol: str,
+        timeframe: str,
+        candle_epoch: int,
+        metadata: Optional[dict[str, Any]] = None,
+        *,
+        id: Optional[str] = None,
         event_time: Optional[int] = None,
         confirmed_at: Optional[int] = None,
         developing: bool = False,
@@ -179,30 +230,65 @@ class Observation:
         variant: Optional[str] = None,
         detector_id: Optional[str] = None,
         detector_config_id: Optional[str] = None,
-        reference_ids: Optional[tuple[str, ...]] = None,
+        reference_ids: Optional[list[str] | tuple[str, ...]] = None,
         lifecycle_state: Optional[str] = None,
-        metadata: Optional[dict[str, Any]] = None,
         payload: Optional[dict[str, Any]] = None,
-        detected_at: Optional[float] = None,
-        id: Optional[str] = None,
     ) -> "Observation":
-        """Factory that keeps metadata/payload synchronized when only one is supplied."""
+        """
+        Factory preserving the original positional/keyword surface.
+        New confirmed detectors should pass event_time and confirmed_at explicitly.
+        Default: confirmed at candle_epoch (engulfing-compatible), not developing.
+
+        Id policy:
+          - Explicit id= wins.
+          - Else if detector_id is set, use stable_event_id (idempotent re-emissions).
+          - Else random UUID (ad-hoc / synthetic observations in tests).
+        """
         meta = dict(metadata or {})
         pay = dict(payload or {})
-        if payload is None and metadata is not None:
+        # Keep metadata and payload from diverging on the create path when only one is given
+        if payload is None and meta:
             pay = dict(meta)
-        elif metadata is None and payload is not None:
+        elif metadata is None and pay:
             meta = dict(pay)
+
+        et = event_time if event_time is not None else candle_epoch
+        # Explicit developing must not get a synthetic confirmed_at
+        if developing:
+            conf: Optional[int] = None
+        elif confirmed_at is not None:
+            conf = confirmed_at
+        else:
+            conf = candle_epoch
+
+        if id is not None:
+            oid = id
+        elif detector_id is not None:
+            oid = Observation.stable_event_id(
+                type,
+                symbol,
+                timeframe,
+                candle_epoch,
+                detector_id=detector_id,
+                direction=direction,
+                developing=developing,
+                variant=variant,
+                event_time=et,
+                confirmed_at=conf,
+            )
+        else:
+            oid = str(uuid.uuid4())
+
         return Observation(
-            id=id or str(uuid.uuid4()),
+            id=oid,
             type=type,
             symbol=symbol,
             timeframe=timeframe,
             candle_epoch=candle_epoch,
-            detected_at=detected_at if detected_at is not None else time.time(),
+            detected_at=time.time(),
             metadata=meta,
-            event_time=event_time,
-            confirmed_at=confirmed_at,
+            event_time=et,
+            confirmed_at=conf,
             developing=developing,
             direction=direction,
             variant=variant,
@@ -217,46 +303,48 @@ class Observation:
 @dataclass(frozen=True)
 class ObservationLifecycleEvent:
     """
-    Append-only lifecycle transition for an observation concept.
-
-    Never rewrite prior events or mutate prior observations.
-    lifecycle_state on Observation is a snapshot at emission only;
-    latest state is derived via project_lifecycle_state(events).
+    Append-only record of a lifecycle transition or interaction for an observation.
+    Observations and prior lifecycle events are immutable; later changes append new events.
+    Interaction events (touch, retest, ...) need not change lifecycle state.
     """
 
     id: str
     observation_id: str
-    concept_type: str
-    from_state: Optional[str]
-    to_state: Optional[str]
-    event_type: str  # transition name or interaction (touch, retest, ...)
-    at_time: int  # market time
-    detected_at: float
-    metadata: dict[str, Any] = field(default_factory=dict)
+    event_type: str  # e.g. mitigated, invalidated, retested, touch
+    event_time: int  # market/candle time of the transition/interaction
+    detected_at: float  # wall-clock emission
+    from_state: Optional[str] = None
+    to_state: Optional[str] = None
+    confirmed_at: Optional[int] = None
+    payload: dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def create(
         *,
         observation_id: str,
-        concept_type: str,
-        from_state: Optional[str],
-        to_state: Optional[str],
+        concept_type: str = "",
+        from_state: Optional[str] = None,
+        to_state: Optional[str] = None,
         event_type: str,
-        at_time: int,
+        at_time: Optional[int] = None,
+        event_time: Optional[int] = None,
         metadata: Optional[dict[str, Any]] = None,
-        detected_at: Optional[float] = None,
+        payload: Optional[dict[str, Any]] = None,
+        confirmed_at: Optional[int] = None,
         id: Optional[str] = None,
     ) -> "ObservationLifecycleEvent":
+        # Accept both at_time (preferred) and event_time alias used in older tests
+        t = at_time if at_time is not None else (event_time if event_time is not None else 0)
         return ObservationLifecycleEvent(
             id=id or str(uuid.uuid4()),
             observation_id=observation_id,
-            concept_type=concept_type,
+            event_type=event_type,
+            event_time=t,
+            detected_at=time.time(),
             from_state=from_state,
             to_state=to_state,
-            event_type=event_type,
-            at_time=at_time,
-            detected_at=detected_at if detected_at is not None else time.time(),
-            metadata=dict(metadata or {}),
+            confirmed_at=confirmed_at,
+            payload=dict(payload or metadata or {}),
         )
 
 
@@ -270,7 +358,6 @@ class LifecycleDefinition:
 
     concept_type: str
     allowed_transitions: tuple[tuple[Optional[str], Optional[str], str], ...] = ()
-    # (from_state, to_state, event_type); from/to None means unconstrained for that side
 
     def validate_transition(
         self,
@@ -278,9 +365,8 @@ class LifecycleDefinition:
         to_state: Optional[str],
         event_type: str,
     ) -> None:
-        """Raise LifecycleTransitionError if this transition is not allowed."""
         if not self.allowed_transitions:
-            return  # unrestricted when no rules configured
+            return
         for fr, to, et in self.allowed_transitions:
             fr_ok = fr is None or fr == from_state
             to_ok = to is None or to == to_state
