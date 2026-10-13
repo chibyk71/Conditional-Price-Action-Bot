@@ -48,12 +48,26 @@ def test_doji_bullish_still_bullish():
     c = _c(10.0, 15.0, 5.0, 10.5)
     assert candle_direction(c) == "bullish" and is_doji(c, 0.10) is True
 
-def test_doji_invalid_threshold():
+def test_doji_invalid_threshold_nonzero_range():
     c = _c(10.0, 12.0, 8.0, 11.0)
     with pytest.raises(ValueError):
         is_doji(c, -0.01)
     with pytest.raises(ValueError):
         is_doji(c, 1.01)
+    with pytest.raises(ValueError):
+        analyze_candle(c, doji_threshold=-0.5)
+
+def test_doji_invalid_threshold_zero_range():
+    """Threshold must be validated even when range is zero (locked contract)."""
+    c = _c(5.0, 5.0, 5.0, 5.0)
+    with pytest.raises(ValueError):
+        is_doji(c, -0.01)
+    with pytest.raises(ValueError):
+        is_doji(c, 1.5)
+    with pytest.raises(ValueError):
+        analyze_candle(c, doji_threshold=2.0)
+    with pytest.raises(ValueError):
+        analyze_candle(c, doji_threshold=-1.0)
 
 def test_positive_width_overlap():
     ov = candle_overlap(_c(10,12,8,11), _c(9,11,7,10))
