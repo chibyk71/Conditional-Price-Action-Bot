@@ -67,10 +67,27 @@ confirms: availability alone is not enough.
 `ConditionEngine` still tracks emitted `(condition_id, candle_epoch)` pairs so
 the same evaluation event is not emitted twice within a process.
 
+### Observation retention (live engine)
+
+`ConditionEngine` holds a bounded `ObservationStore`:
+
+- Detector emissions from each `evaluate_once` are accepted into the store
+  (deduped by observation id; first write wins).
+- Evaluation uses **all retained** observations for the series, not only the
+  current cycle's detector output. This is required for multi-component setups
+  whose components confirm on different bars.
+- Retention does **not** invent activation: the evaluator still requires at
+  least one supporting observation newly associated with bar `T`.
+- Policy: `max_size` (default 1000) drops oldest by market anchor; optional
+  `max_age_seconds` prunes relative to the current evaluation epoch.
+- Readiness remains authoritative: if `can_evaluate()` is false, no detection,
+  retention, or condition evaluation runs.
+
 ### Live stream boundary
 
-The live engine only consumes observations emitted into the accepted stream of
-the current `evaluate_once` (detectors → engine); no external injection path.
+New facts enter the store only via detector emissions inside `evaluate_once`.
+There is no external injection path. Retained priors are available for
+matching but are not re-emitted as new activation events.
 
 ## Observation immutability (documented scope)
 
