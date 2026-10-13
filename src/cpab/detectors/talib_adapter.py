@@ -10,11 +10,17 @@ detectors. Forming candles are rejected at the adapter boundary. Insufficient
 history yields an explicit non-emission outcome (no Observation). A raw zero
 result means no pattern observation is emitted.
 
-Minimum history is derived from TA-Lib's own lookback for each pattern:
+Minimum history is derived from TA-Lib's function-specific computational lookback:
   min_history = Function(pattern).lookback + 1
-That is the number of completed candles required before the latest bar can be
-a valid (non-unstable-period) evaluation of the pattern. Unsupported pattern
-names are rejected rather than assigned an arbitrary default.
+
+`Function(name).lookback` is TA-Lib's reported lookback for that function under
+the installed library and its default configuration. It is the number of
+preceding input bars the function requires before the current bar can be
+evaluated. Adding 1 includes the signal bar itself, giving the minimum number
+of completed candles CPAB requires before evaluating the latest bar.
+Lookback values depend on the TA-Lib implementation and configuration in use;
+they are read at runtime, not hard-coded. Unsupported pattern names are
+rejected rather than assigned an arbitrary default.
 """
 
 from __future__ import annotations
@@ -88,8 +94,13 @@ def resolve_pattern_name(pattern: str) -> str:
 
 def talib_lookback(pattern: str) -> int:
     """
-    Computational lookback from TA-Lib itself (Function.lookback).
-    This is the number of leading bars in the unstable period for the pattern.
+    TA-Lib's function-specific computational lookback for ``pattern``.
+
+    Returns ``Function(name).lookback`` from the installed TA-Lib library under
+    its default configuration. This is the number of preceding input bars the
+    function requires before the current bar can be evaluated. It is not a
+    hard-coded structural candle count and may differ across TA-Lib builds or
+    candle settings.
     """
     from talib.abstract import Function
 
@@ -101,8 +112,9 @@ def min_history_for(pattern: str) -> int:
     """
     Minimum completed candles required to evaluate the *latest* bar.
 
-    Derived from TA-Lib: lookback + 1 (lookback preceding bars + the signal bar).
-    Raises ValueError for unsupported patterns.
+    Equals ``talib_lookback(pattern) + 1``: the function's reported lookback
+    (preceding bars) plus the signal bar itself. Raises ValueError for
+    unsupported patterns.
     """
     return talib_lookback(pattern) + 1
 
