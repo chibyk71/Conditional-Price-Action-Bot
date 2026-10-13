@@ -9,6 +9,13 @@ Answers:
 Not a plugin system. No dynamic imports, no DI framework.
 Unsupported concepts and invalid configurations fail during validation
 (before market monitoring), with no silent substitution.
+
+Each registered capability has an immutable effective configuration.
+Caller-supplied config may only supply keys already present with the same
+values (or omit keys to accept defaults). Overriding a fixed pattern or other
+immutable parameter is rejected. create_detector always constructs from the
+registered configuration so detector_config_id, pattern, and min_history
+describe the instance that actually runs.
 """
 
 from __future__ import annotations
@@ -104,6 +111,14 @@ class CapabilityRegistry:
             return False
 
     def validate_config(self, concept: str, config: dict[str, Any]) -> CapabilityInfo:
+        """
+        Validate concept + config against a registered capability.
+
+        Registered configs are immutable: caller keys must not introduce unknown
+        params, and any provided value for a registered key must equal the
+        registered default (no silent override of pattern or other fixed params).
+        The returned CapabilityInfo always reflects the registered effective config.
+        """
         if concept not in self._concept_index:
             raise ValueError(f"Unsupported concept: {concept!r}")
         detector_ids = self._concept_index[concept]
@@ -111,6 +126,8 @@ class CapabilityRegistry:
         for did in detector_ids:
             entry = self._entries[did]
             accepted = entry.get("accepted_params")
+            registered = dict(entry["config"])
+
             if accepted is not None:
                 unknown = set(config) - set(accepted)
                 if unknown:
@@ -119,28 +136,32 @@ class CapabilityRegistry:
                         f"unknown params {sorted(unknown)}"
                     )
                     continue
-            effective = dict(entry["config"])
-            effective.update(config)
-            if accepted is not None:
-                unknown2 = set(effective) - set(accepted)
-                if unknown2:
+
+            # Reject attempts to override immutable registered values
+            for key, val in config.items():
+                if key in registered and registered[key] != val:
                     last_error = (
                         f"Invalid configuration for concept {concept!r}: "
-                        f"unknown params {sorted(unknown2)}"
+                        f"cannot override fixed parameter {key!r} "
+                        f"(registered={registered[key]!r}, got={val!r})"
                     )
-                    continue
-            config_id = deterministic_config_id(effective)
-            mh = entry["min_history"]
-            if mh is None and entry.get("pattern"):
-                mh = min_history_for(entry["pattern"])
-            return CapabilityInfo(
-                concept=concept,
-                detector_id=did,
-                detector_config_id=config_id,
-                min_history=mh if mh is not None else 2,
-                pattern=entry.get("pattern"),
-                implementation=entry.get("implementation") or "",
-            )
+                    break
+            else:
+                # effective config is always the registered config (immutable)
+                effective = dict(registered)
+                config_id = deterministic_config_id(effective)
+                mh = entry["min_history"]
+                if mh is None and entry.get("pattern"):
+                    mh = min_history_for(entry["pattern"])
+                return CapabilityInfo(
+                    concept=concept,
+                    detector_id=did,
+                    detector_config_id=config_id,
+                    min_history=mh if mh is not None else 2,
+                    pattern=entry.get("pattern"),
+                    implementation=entry.get("implementation") or "",
+                )
+            continue
         if last_error:
             raise ValueError(last_error)
         raise ValueError(f"No valid detector configuration for concept {concept!r}")
@@ -155,11 +176,23 @@ class CapabilityRegistry:
         *,
         config: Optional[dict[str, Any]] = None,
     ) -> tuple[PriceActionDetector, CapabilityInfo]:
+        """
+        Instantiate the detector for a validated concept.
+        The detector is always built from the registered factory/config so
+        pattern, min_history, and detector_config_id match the running instance.
+        """
         info = self.validate_config(concept, config or {})
         entry = self._entries[info.detector_id]
         det = entry["factory"]()
-        if isinstance(det, TalibPatternDetector) and det._detector_config_id is None:
+        # Attach the validated (registered) config identity
+        if isinstance(det, TalibPatternDetector):
             det._detector_config_id = info.detector_config_id
+            # Ensure pattern matches registration
+            if info.pattern and det.pattern != info.pattern:
+                raise RuntimeError(
+                    f"Factory pattern mismatch: detector has {det.pattern!r}, "
+                    f"registry expects {info.pattern!r}"
+                )
         return det, info
 
     def get_entry(self, detector_id: str) -> Optional[dict[str, Any]]:
