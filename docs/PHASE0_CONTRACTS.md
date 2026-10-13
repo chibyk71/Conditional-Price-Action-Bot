@@ -72,8 +72,10 @@ the same evaluation event is not emitted twice within a process.
 ### Observation identity (idempotent emissions)
 
 - `Observation.create` uses a **stable event id** when `detector_id` is set
-  (`type|symbol|timeframe|candle_epoch|…`), so repeated `detect()` calls on the
-  same logical event produce the same id.
+  (`type|symbol|timeframe|candle_epoch|…|detector_id|detector_config_id|…`),
+  so repeated `detect()` calls on the same logical event produce the same id.
+- `detector_config_id` is part of the identity: two configured instances of the
+  same detector type can emit distinct observations on the same bar.
 - Without `detector_id`, a random UUID is used (synthetic/test observations).
 - Explicit `id=` overrides both.
 
