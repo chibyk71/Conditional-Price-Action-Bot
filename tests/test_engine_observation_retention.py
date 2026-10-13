@@ -271,3 +271,36 @@ def test_stable_event_id_distinct_for_different_bars():
         candle_epoch=100, confirmed_at=100, detector_id="engulfing", direction="bullish",
     )
     assert a.id == a2.id
+
+
+def test_stable_event_id_includes_detector_config_id():
+    """
+    Same detector_id + different detector_config_id => distinct observation ids.
+    Both can be retained in the store (first-write-wins must not collapse them).
+    Same config re-emitted => same id (idempotent).
+    """
+    kwargs = dict(
+        type="bullish_engulfing",
+        symbol="R_100",
+        timeframe="1m",
+        candle_epoch=1_700_000_060,
+        confirmed_at=1_700_000_060,
+        detector_id="engulfing",
+        direction="bullish",
+    )
+    cfg_a = Observation.create(**kwargs, detector_config_id="strict")
+    cfg_a_again = Observation.create(**kwargs, detector_config_id="strict")
+    cfg_b = Observation.create(**kwargs, detector_config_id="relaxed")
+    no_cfg = Observation.create(**kwargs)
+
+    assert cfg_a.id == cfg_a_again.id
+    assert cfg_a.id != cfg_b.id
+    assert cfg_a.id != no_cfg.id
+    assert cfg_b.id != no_cfg.id
+
+    store = ObservationStore(max_size=10, max_age_seconds=None)
+    assert store.accept([cfg_a, cfg_b, no_cfg]) == 3
+    assert store.accept([cfg_a_again]) == 0
+    assert len(store) == 3
+    ids = {o.id for o in store.all()}
+    assert ids == {cfg_a.id, cfg_b.id, no_cfg.id}
