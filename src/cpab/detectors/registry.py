@@ -1,21 +1,8 @@
 """
 Minimal detector capability registry for CPAB Phase 1.
 
-Answers:
-  1. Which concepts/patterns are supported?
-  2. Which detector implementation + effective config provide the capability?
-  3. What minimum history does the capability require?
-
-Not a plugin system. No dynamic imports, no DI framework.
-Unsupported concepts and invalid configurations fail during validation
-(before market monitoring), with no silent substitution.
-
-Each registered capability has an immutable effective configuration.
-Caller-supplied config may only supply keys already present with the same
-values (or omit keys to accept defaults). Overriding a fixed pattern or other
-immutable parameter is rejected. create_detector always constructs from the
-registered configuration so detector_config_id, pattern, and min_history
-describe the instance that actually runs.
+Registered capabilities have immutable effective configuration.
+Unsupported patterns are rejected (no arbitrary min-history default).
 """
 
 from __future__ import annotations
@@ -29,16 +16,13 @@ from cpab.detectors.base import PriceActionDetector
 from cpab.detectors.talib_adapter import (
     TalibPatternDetector,
     min_history_for,
+    resolve_pattern_name,
     _PATTERN_ALIASES,
+    _SUPPORTED_PATTERNS,
 )
 
 
 def deterministic_config_id(config: dict[str, Any]) -> str:
-    """
-    Deterministic detector_config_id from effective configuration.
-    Equivalent effective configs → same ID; order-independent.
-    Compatible with Phase 0 Observation identity (plain string token).
-    """
     canonical = json.dumps(config, sort_keys=True, separators=(",", ":"), default=str)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
     return f"cfg:{digest}"
@@ -111,14 +95,6 @@ class CapabilityRegistry:
             return False
 
     def validate_config(self, concept: str, config: dict[str, Any]) -> CapabilityInfo:
-        """
-        Validate concept + config against a registered capability.
-
-        Registered configs are immutable: caller keys must not introduce unknown
-        params, and any provided value for a registered key must equal the
-        registered default (no silent override of pattern or other fixed params).
-        The returned CapabilityInfo always reflects the registered effective config.
-        """
         if concept not in self._concept_index:
             raise ValueError(f"Unsupported concept: {concept!r}")
         detector_ids = self._concept_index[concept]
@@ -137,7 +113,6 @@ class CapabilityRegistry:
                     )
                     continue
 
-            # Reject attempts to override immutable registered values
             for key, val in config.items():
                 if key in registered and registered[key] != val:
                     last_error = (
@@ -147,7 +122,6 @@ class CapabilityRegistry:
                     )
                     break
             else:
-                # effective config is always the registered config (immutable)
                 effective = dict(registered)
                 config_id = deterministic_config_id(effective)
                 mh = entry["min_history"]
@@ -176,18 +150,11 @@ class CapabilityRegistry:
         *,
         config: Optional[dict[str, Any]] = None,
     ) -> tuple[PriceActionDetector, CapabilityInfo]:
-        """
-        Instantiate the detector for a validated concept.
-        The detector is always built from the registered factory/config so
-        pattern, min_history, and detector_config_id match the running instance.
-        """
         info = self.validate_config(concept, config or {})
         entry = self._entries[info.detector_id]
         det = entry["factory"]()
-        # Attach the validated (registered) config identity
         if isinstance(det, TalibPatternDetector):
             det._detector_config_id = info.detector_config_id
-            # Ensure pattern matches registration
             if info.pattern and det.pattern != info.pattern:
                 raise RuntimeError(
                     f"Factory pattern mismatch: detector has {det.pattern!r}, "
@@ -221,6 +188,7 @@ def build_default_registry() -> CapabilityRegistry:
         concepts = [alias, pattern.lower(), pattern]
         base = pattern.lower().replace("cdl", "")
         concepts.extend([f"bullish_{base}", f"bearish_{base}"])
+        mh = min_history_for(pattern)
 
         def _make_factory(p: str = pattern) -> Callable[[], PriceActionDetector]:
             def factory() -> PriceActionDetector:
@@ -233,7 +201,7 @@ def build_default_registry() -> CapabilityRegistry:
             factory=_make_factory(),
             config={"pattern": pattern},
             accepted_params=["pattern"],
-            min_history=min_history_for(pattern),
+            min_history=mh,
             implementation="talib",
             pattern=pattern,
         )
