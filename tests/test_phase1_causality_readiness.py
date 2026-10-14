@@ -125,8 +125,8 @@ def _assert_observation_causality(series, pattern: str, det_id: str, cfg: str) -
             assert obs_prefix.direction == obs_full.direction
             assert obs_prefix.candle_epoch == obs_full.candle_epoch == series[i].epoch
             assert obs_prefix.detector_config_id == obs_full.detector_config_id == cfg
+            assert obs_prefix.payload == obs_full.payload
             assert obs_prefix.payload.get("raw_talib_value") == prefix_val
-            assert obs_full.payload.get("raw_talib_value") == full_val
 
 
 def test_historical_talib_results_stable_engulfing():
