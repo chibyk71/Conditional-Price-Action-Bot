@@ -8,11 +8,13 @@ from cpab.detectors.registry import (
     build_default_registry,
     deterministic_config_id,
 )
+from cpab.detectors.swing import SwingPivotDetector
 
 __all__ = [
     "PriceActionDetector",
     "EngulfingDetector",
     "TalibPatternDetector",
+    "SwingPivotDetector",
     "evaluate_raw",
     "AdapterOutcomeKind",
     "CapabilityRegistry",
