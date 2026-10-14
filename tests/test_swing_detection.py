@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cpab.detectors.swing import SwingPivotDetector
+from cpab.detectors.swing import SwingPivotDetector, timeframe_seconds
 from cpab.detectors.registry import build_default_registry, deterministic_config_id
 from cpab.models import Candle, Observation
 from cpab.core.observation_store import ObservationStore
@@ -33,14 +33,21 @@ def _c(
     )
 
 
-def _series(highs: list[float], lows: list[float] | None = None, start: int = 1_700_000_000) -> list[Candle]:
-    """Build closed 1m candles; body near mid of high/low."""
+def _series(
+    highs: list[float],
+    lows: list[float] | None = None,
+    start: int = 1_700_000_000,
+    *,
+    step: int = 60,
+    timeframe: str = "1m",
+) -> list[Candle]:
+    """Build closed candles; body near mid of high/low."""
     lows = lows if lows is not None else [h - 1.0 for h in highs]
     assert len(highs) == len(lows)
     out = []
     for i, (h, l) in enumerate(zip(highs, lows)):
         mid = (h + l) / 2.0
-        out.append(_c(start + i * 60, mid, h, l, mid))
+        out.append(_c(start + i * step, mid, h, l, mid, timeframe=timeframe))
     return out
 
 
@@ -58,6 +65,18 @@ def test_invalid_negative_strength_raises():
         SwingPivotDetector(left_strength=1, right_strength=-2)
 
 
+def test_invalid_float_strength_raises():
+    with pytest.raises(ValueError, match="left_strength"):
+        SwingPivotDetector(left_strength=1.5, right_strength=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="right_strength"):
+        SwingPivotDetector(left_strength=1, right_strength=2.0)  # type: ignore[arg-type]
+
+
+def test_invalid_bool_strength_raises():
+    with pytest.raises(ValueError, match="left_strength"):
+        SwingPivotDetector(left_strength=True, right_strength=1)  # type: ignore[arg-type]
+
+
 def test_invalid_tie_policy_raises():
     with pytest.raises(ValueError, match="tie_policy"):
         SwingPivotDetector(tie_policy="middle")
@@ -69,6 +88,7 @@ def test_defaults_1_1_strict():
     assert d.right_strength == 1
     assert d.tie_policy == "strict"
     assert d.min_history == 3
+    assert d.detector_config_id.startswith("cfg:")
 
 
 def test_valid_swing_high_1_1():
@@ -118,6 +138,38 @@ def test_candidate_fails_against_right():
     candles = _series([10.0, 12.0, 13.0])
     d = SwingPivotDetector(left_strength=1, right_strength=1, tie_policy="strict")
     assert d.detect(candles) == []
+
+
+def test_missing_interval_prevents_swing():
+    """Epochs 0, 60, 180 for 1m (missing 120) must not produce a swing."""
+    start = 1_700_000_000
+    candles = [
+        _c(start, 10.0, 10.0, 9.0, 10.0),
+        _c(start + 60, 11.0, 12.0, 10.0, 11.0),
+        _c(start + 180, 10.5, 11.0, 9.5, 10.5),
+    ]
+    d = SwingPivotDetector(left_strength=1, right_strength=1, tie_policy="strict")
+    assert d.detect(candles) == []
+    assert d.detect_all_historical(candles) == []
+
+
+def test_correct_spacing_still_qualifies():
+    candles = _series([10.0, 12.0, 11.0], step=60, timeframe="1m")
+    d = SwingPivotDetector(left_strength=1, right_strength=1, tie_policy="strict")
+    assert len([o for o in d.detect(candles) if o.type == "swing_high"]) == 1
+
+
+def test_unknown_timeframe_rejects_window():
+    candles = _series([10.0, 12.0, 11.0], timeframe="weird_tf")
+    d = SwingPivotDetector(left_strength=1, right_strength=1, tie_policy="strict")
+    assert d.detect(candles) == []
+
+
+def test_timeframe_seconds_known_labels():
+    assert timeframe_seconds("1m") == 60
+    assert timeframe_seconds("5m") == 300
+    assert timeframe_seconds("1h") == 3600
+    assert timeframe_seconds("nope") is None
 
 
 def test_strict_rejects_equal_highs():
@@ -220,6 +272,17 @@ def test_correct_timestamps():
     assert o.developing is False
 
 
+def test_confirmed_at_eligibility_against_phase0_T():
+    """Swing not eligible before confirming candle open epoch (Phase 0 T)."""
+    candles = _series([10.0, 12.0, 11.0])
+    d = SwingPivotDetector(left_strength=1, right_strength=1)
+    obs = d.detect(candles)[0]
+    assert not obs.is_eligible_at(candles[1].epoch)
+    assert obs.is_eligible_at(candles[2].epoch)
+    assert obs.is_eligible_at(candles[2].epoch + 60)
+    assert obs.effective_confirmed_at() == candles[2].epoch
+
+
 def test_gap_in_window_prevents_confirmation():
     candles = _series([10.0, 12.0, 11.0])
     bad = list(candles)
@@ -264,10 +327,7 @@ def test_forming_candle_not_used_as_confirmation():
 def test_observation_payload_and_null_direction():
     candles = _series([10.0, 12.0, 11.0])
     cfg = {"left_strength": 1, "right_strength": 1, "tie_policy": "strict"}
-    d = SwingPivotDetector(
-        **cfg,
-        detector_config_id=deterministic_config_id(cfg),
-    )
+    d = SwingPivotDetector(**cfg)
     obs = d.detect(candles)[0]
     assert obs.direction is None
     assert obs.variant == "pivot_lr"
@@ -281,9 +341,7 @@ def test_observation_payload_and_null_direction():
 
 def test_stable_identity_and_idempotent_store():
     candles = _series([10.0, 12.0, 11.0])
-    cfg = {"left_strength": 1, "right_strength": 1, "tie_policy": "strict"}
-    cid = deterministic_config_id(cfg)
-    d = SwingPivotDetector(**cfg, detector_config_id=cid)
+    d = SwingPivotDetector(left_strength=1, right_strength=1, tie_policy="strict")
     o1 = d.detect(candles)
     o2 = d.detect(candles)
     assert len(o1) == 1 and len(o2) == 1
@@ -293,21 +351,22 @@ def test_stable_identity_and_idempotent_store():
     assert store.accept(o2) == 0
 
 
-def test_different_config_distinct_identity():
+def test_direct_construction_distinct_config_identity():
+    """Directly constructed detectors with different configs must not share identity."""
     candles = _series([10.0, 12.0, 11.0])
-    d1 = SwingPivotDetector(
-        left_strength=1, right_strength=1, tie_policy="strict",
-        detector_config_id=deterministic_config_id(
-            {"left_strength": 1, "right_strength": 1, "tie_policy": "strict"}
-        ),
-    )
-    d2 = SwingPivotDetector(
-        left_strength=1, right_strength=1, tie_policy="all",
-        detector_config_id=deterministic_config_id(
-            {"left_strength": 1, "right_strength": 1, "tie_policy": "all"}
-        ),
-    )
-    assert d1.detect(candles)[0].id != d2.detect(candles)[0].id
+    d1 = SwingPivotDetector(left_strength=1, right_strength=1, tie_policy="strict")
+    d2 = SwingPivotDetector(left_strength=1, right_strength=1, tie_policy="all")
+    d3 = SwingPivotDetector(left_strength=2, right_strength=1, tie_policy="strict")
+    assert d1.detector_config_id != d2.detector_config_id
+    assert d1.detector_config_id != d3.detector_config_id
+    d1b = SwingPivotDetector(left_strength=1, right_strength=1, tie_policy="strict")
+    assert d1.detector_config_id == d1b.detector_config_id
+    o1 = d1.detect(candles)
+    o2 = d2.detect(candles)
+    assert o1 and o2
+    assert o1[0].id != o2[0].id
+    assert o1[0].detector_config_id is not None
+    assert o2[0].detector_config_id is not None
 
 
 def test_registry_integration():
@@ -320,6 +379,7 @@ def test_registry_integration():
     assert info.min_history == 3
     assert det.min_history == 3
     assert info.detector_config_id.startswith("cfg:")
+    assert det.detector_config_id == info.detector_config_id
 
     det2, info2 = reg.create_detector(
         "swing_low",
@@ -340,10 +400,14 @@ def test_registry_rejects_unknown_param():
         reg.validate_config("swing", {"left_strength": 1, "foo": 1})
 
 
-def test_registry_rejects_invalid_strength_via_factory():
+def test_registry_rejects_float_and_bool_strength():
     reg = build_default_registry()
     with pytest.raises(ValueError, match="left_strength"):
-        reg.create_detector("swing", config={"left_strength": 0})
+        reg.create_detector("swing", config={"left_strength": 1.5})
+    with pytest.raises(ValueError, match="left_strength"):
+        reg.create_detector("swing", config={"left_strength": True})
+    with pytest.raises(ValueError, match="right_strength"):
+        reg.create_detector("swing", config={"right_strength": 0})
 
 
 def test_engulfing_still_registered():
@@ -351,3 +415,38 @@ def test_engulfing_still_registered():
     det, info = reg.create_detector("engulfing")
     assert info.min_history == 2
     assert det.name == "engulfing"
+
+
+def test_readiness_gate_blocks_engine_evaluation():
+    """When readiness is not READY, ConditionEngine must not run detectors."""
+    from unittest.mock import MagicMock
+    from cpab.core.engine import ConditionEngine
+    from cpab.market.readiness import ReadinessManager
+    from cpab.models import ReadinessState, ConditionDef
+
+    readiness = ReadinessManager()
+    assert readiness.state == ReadinessState.INITIALIZING
+    assert not readiness.can_evaluate()
+
+    market = MagicMock()
+    market.completed_candles.return_value = _series([10.0, 12.0, 11.0])
+
+    det = SwingPivotDetector(left_strength=1, right_strength=1)
+    engine = ConditionEngine(
+        market=market,
+        detectors=[det],
+        conditions=[
+            ConditionDef(
+                id="c1",
+                symbol="R_100",
+                timeframe="1m",
+                enabled=True,
+                require_observations=[{"type": "swing_high", "min_count": 1}],
+            )
+        ],
+        readiness=readiness,
+    )
+    signals = engine.evaluate_once()
+    assert signals == []
+    assert engine.last_observations == []
+    market.completed_candles.assert_not_called()
