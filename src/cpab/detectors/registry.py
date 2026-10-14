@@ -11,9 +11,10 @@ within accepted_params; effective config drives detector construction and config
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional
 
 from cpab.detectors.base import PriceActionDetector
 from cpab.detectors.talib_adapter import (
@@ -44,6 +45,29 @@ class CapabilityInfo:
 
 # Factory may be zero-arg or accept a single config dict.
 DetectorFactory = Callable[..., PriceActionDetector]
+
+
+def _factory_accepts_config(factory: DetectorFactory) -> bool:
+    """
+    Inspect the factory signature to decide whether to pass effective config.
+
+    Avoids catching TypeError from inside the factory body, which would mask
+    real construction failures.
+    """
+    try:
+        sig = inspect.signature(factory)
+    except (TypeError, ValueError):
+        return False
+    params = list(sig.parameters.values())
+    if not params:
+        return False
+    first = params[0]
+    if first.kind in (
+        inspect.Parameter.VAR_POSITIONAL,
+        inspect.Parameter.VAR_KEYWORD,
+    ):
+        return False
+    return True
 
 
 @dataclass
@@ -121,8 +145,6 @@ class CapabilityRegistry:
                     )
                     continue
 
-            # Fixed params: keys present in registered that are NOT in accepted_params
-            # cannot be overridden. Keys in accepted_params may be overridden.
             accepted_set = set(accepted) if accepted is not None else set()
             conflict = False
             for key, val in config.items():
@@ -143,15 +165,30 @@ class CapabilityRegistry:
                     if key in accepted_set:
                         effective[key] = val
 
-            config_id = deterministic_config_id(effective)
-            mh = entry["min_history"]
-            if mh is None and entry.get("pattern"):
-                mh = min_history_for(entry["pattern"])
-            # Swing: min_history from strengths when present
+            # Swing: validate strengths as positive ints *before* using them
+            # (no silent coercion of floats / bools).
             if entry.get("implementation") == "swing_pivot":
-                left = int(effective.get("left_strength", 1))
-                right = int(effective.get("right_strength", 1))
+                from cpab.detectors.swing import _validate_strength, _validate_tie_policy
+
+                left = _validate_strength(
+                    "left_strength", effective.get("left_strength", 1)
+                )
+                right = _validate_strength(
+                    "right_strength", effective.get("right_strength", 1)
+                )
+                policy = _validate_tie_policy(effective.get("tie_policy", "strict"))
+                effective = {
+                    "left_strength": left,
+                    "right_strength": right,
+                    "tie_policy": policy,
+                }
                 mh = left + 1 + right
+            else:
+                mh = entry["min_history"]
+                if mh is None and entry.get("pattern"):
+                    mh = min_history_for(entry["pattern"])
+
+            config_id = deterministic_config_id(effective)
             return CapabilityInfo(
                 concept=concept,
                 detector_id=did,
@@ -180,11 +217,10 @@ class CapabilityRegistry:
         factory = entry["factory"]
         effective = info.config
 
-        det: PriceActionDetector
-        # Prefer config-aware factory (Phase 2A swing); fall back to zero-arg.
-        try:
+        # Explicit signature check — do not catch TypeError from factory body.
+        if _factory_accepts_config(factory):
             det = factory(effective)
-        except TypeError:
+        else:
             det = factory()
 
         if isinstance(det, TalibPatternDetector):
@@ -194,8 +230,6 @@ class CapabilityRegistry:
                     f"Factory pattern mismatch: detector has {det.pattern!r}, "
                     f"registry expects {info.pattern!r}"
                 )
-        # Swing and other config-aware detectors should already embed config_id;
-        # force-set if attribute exists and is still None.
         if hasattr(det, "_detector_config_id") and getattr(det, "_detector_config_id") is None:
             det._detector_config_id = info.detector_config_id  # type: ignore[attr-defined]
         return det, info
@@ -251,20 +285,12 @@ def build_default_registry() -> CapabilityRegistry:
         from cpab.detectors.swing import SwingPivotDetector
 
         c = dict(cfg or {})
-        left = int(c.get("left_strength", 1))
-        right = int(c.get("right_strength", 1))
-        policy = str(c.get("tie_policy", "strict"))
-        effective = {
-            "left_strength": left,
-            "right_strength": right,
-            "tie_policy": policy,
-        }
+        # SwingPivotDetector validates types; pass through without int()/str() coercion.
         return SwingPivotDetector(
-            left_strength=left,
-            right_strength=right,
-            tie_policy=policy,
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
             detector_id="swing_pivot",
-            detector_config_id=deterministic_config_id(effective),
         )
 
     default_swing_cfg = {
