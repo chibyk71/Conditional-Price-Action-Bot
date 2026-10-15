@@ -9,12 +9,14 @@ from cpab.detectors.registry import (
     deterministic_config_id,
 )
 from cpab.detectors.swing import SwingPivotDetector
+from cpab.detectors.equal_levels import EqualLevelsDetector
 
 __all__ = [
     "PriceActionDetector",
     "EngulfingDetector",
     "TalibPatternDetector",
     "SwingPivotDetector",
+    "EqualLevelsDetector",
     "evaluate_raw",
     "AdapterOutcomeKind",
     "CapabilityRegistry",
