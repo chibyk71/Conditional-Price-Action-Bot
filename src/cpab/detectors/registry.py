@@ -6,6 +6,9 @@ Unsupported patterns / invalid params are rejected (no silent substitution).
 
 Phase 2A: swing_pivot accepts left_strength, right_strength, tie_policy as
 overridable configuration. TA-Lib pattern values remain fixed at registration.
+
+Phase 2B: equal_levels accepts tolerance (required), left_strength, right_strength,
+tie_policy. Tolerance has no silent default.
 """
 
 from __future__ import annotations
@@ -136,7 +139,8 @@ class CapabilityRegistry:
             different value raises ValueError (cannot override).
           - Keys in ``accepted_params`` but not fixed in registered config may be
             supplied by the caller and become part of the effective config.
-          - Swing applies documented defaults for missing overridable keys.
+          - Swing / equal_levels apply documented defaults for missing overridable keys
+            (except equal_levels tolerance, which is required).
         """
         if concept not in self._concept_index:
             raise ValueError(f"Unsupported concept: {concept!r}")
@@ -157,8 +161,6 @@ class CapabilityRegistry:
                     continue
 
             # Fixed parameters: any key in registered config is immutable.
-            # accepted_params only controls which keys are *allowed*, not which
-            # may change a registered value (Phase 1 contract).
             conflict = False
             for key, val in config.items():
                 if key in registered and registered[key] != val:
@@ -176,14 +178,12 @@ class CapabilityRegistry:
             if accepted is not None:
                 accepted_set = set(accepted)
                 for key, val in config.items():
-                    # Only merge non-fixed accepted keys (not already constrained
-                    # by registered). Fixed keys already matched above.
                     if key in accepted_set and key not in registered:
                         effective[key] = val
 
-            # Swing: overridable params live only in accepted_params (registered
-            # config is empty). Apply defaults, then user overrides, then validate.
-            if entry.get("implementation") == "swing_pivot":
+            impl = entry.get("implementation") or ""
+
+            if impl == "swing_pivot":
                 from cpab.detectors.swing import _validate_strength, _validate_tie_policy
 
                 defaults = {
@@ -208,6 +208,48 @@ class CapabilityRegistry:
                     "tie_policy": policy,
                 }
                 mh = left + 1 + right
+            elif impl == "equal_levels":
+                from cpab.detectors.swing import _validate_strength, _validate_tie_policy
+                from cpab.detectors.equal_levels import _validate_tolerance
+
+                # tolerance is required — no silent default
+                if "tolerance" not in config and "tolerance" not in effective:
+                    last_error = (
+                        f"Invalid configuration for concept {concept!r}: "
+                        f"tolerance is required"
+                    )
+                    continue
+                tol_raw = config.get("tolerance", effective.get("tolerance"))
+                try:
+                    tol = _validate_tolerance(tol_raw)
+                except ValueError as e:
+                    last_error = str(e)
+                    continue
+
+                defaults = {
+                    "left_strength": 1,
+                    "right_strength": 1,
+                    "tie_policy": "strict",
+                }
+                merged = dict(defaults)
+                merged.update(effective)
+                if accepted is not None:
+                    for key, val in config.items():
+                        if key in accepted and key != "tolerance":
+                            merged[key] = val
+                left = _validate_strength("left_strength", merged.get("left_strength", 1))
+                right = _validate_strength(
+                    "right_strength", merged.get("right_strength", 1)
+                )
+                policy = _validate_tie_policy(merged.get("tie_policy", "strict"))
+                effective = {
+                    "tolerance": tol,
+                    "left_strength": left,
+                    "right_strength": right,
+                    "tie_policy": policy,
+                }
+                s = left + 1 + right
+                mh = 2 * s - 1
             else:
                 mh = entry["min_history"]
                 if mh is None and entry.get("pattern"):
@@ -257,6 +299,9 @@ class CapabilityRegistry:
                 )
         if hasattr(det, "_detector_config_id") and getattr(det, "_detector_config_id") is None:
             det._detector_config_id = info.detector_config_id  # type: ignore[attr-defined]
+        # Always align config id from registry validation for configured detectors
+        if hasattr(det, "_detector_config_id"):
+            det._detector_config_id = info.detector_config_id  # type: ignore[attr-defined]
         return det, info
 
     def get_entry(self, detector_id: str) -> Optional[dict[str, Any]]:
@@ -295,8 +340,6 @@ def build_default_registry() -> CapabilityRegistry:
             return factory
 
         # pattern is a *fixed* registered value (cannot override).
-        # accepted_params=["pattern"] only allows the key to appear; its value
-        # must match the registered pattern (Phase 1 contract).
         reg.register(
             f"talib:{pattern.lower()}",
             concepts=list(dict.fromkeys(concepts)),
@@ -309,8 +352,6 @@ def build_default_registry() -> CapabilityRegistry:
         )
 
     # --- Phase 2A: swing pivot ---
-    # Registered config is empty so left/right/tie_policy are not fixed params.
-    # Defaults and validation are applied in validate_config for swing_pivot.
     def _swing_factory(cfg: Optional[dict[str, Any]] = None) -> PriceActionDetector:
         from cpab.detectors.swing import SwingPivotDetector
 
@@ -330,6 +371,31 @@ def build_default_registry() -> CapabilityRegistry:
         accepted_params=["left_strength", "right_strength", "tie_policy"],
         min_history=3,
         implementation="swing_pivot",
+    )
+
+    # --- Phase 2B: equal highs / equal lows ---
+    def _equal_levels_factory(cfg: Optional[dict[str, Any]] = None) -> PriceActionDetector:
+        from cpab.detectors.equal_levels import EqualLevelsDetector
+
+        c = dict(cfg or {})
+        if "tolerance" not in c:
+            raise ValueError("tolerance is required for equal_levels")
+        return EqualLevelsDetector(
+            tolerance=c["tolerance"],
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
+            detector_id="equal_levels",
+        )
+
+    reg.register(
+        "equal_levels",
+        concepts=["equal_high", "equal_low", "equal_level", "eqh", "eql"],
+        factory=_equal_levels_factory,
+        config={},  # no fixed params
+        accepted_params=["tolerance", "left_strength", "right_strength", "tie_policy"],
+        min_history=5,
+        implementation="equal_levels",
     )
 
     return reg
