@@ -4,8 +4,8 @@ Minimal detector capability registry for CPAB Phase 1+.
 Registered capabilities have deterministic configuration identity.
 Unsupported patterns / invalid params are rejected (no silent substitution).
 
-Phase 2A: swing_pivot accepts left_strength, right_strength, tie_policy overrides
-within accepted_params; effective config drives detector construction and config_id.
+Phase 2A: swing_pivot accepts left_strength, right_strength, tie_policy as
+overridable configuration. TA-Lib pattern values remain fixed at registration.
 """
 
 from __future__ import annotations
@@ -127,6 +127,17 @@ class CapabilityRegistry:
             return False
 
     def validate_config(self, concept: str, config: dict[str, Any]) -> CapabilityInfo:
+        """
+        Validate user config against registered detectors for ``concept``.
+
+        Semantics:
+          - ``accepted_params`` (when set) is the whitelist of allowed keys.
+          - Keys present in the registered ``config`` are **fixed**: supplying a
+            different value raises ValueError (cannot override).
+          - Keys in ``accepted_params`` but not fixed in registered config may be
+            supplied by the caller and become part of the effective config.
+          - Swing applies documented defaults for missing overridable keys.
+        """
         if concept not in self._concept_index:
             raise ValueError(f"Unsupported concept: {concept!r}")
         detector_ids = self._concept_index[concept]
@@ -145,10 +156,12 @@ class CapabilityRegistry:
                     )
                     continue
 
-            accepted_set = set(accepted) if accepted is not None else set()
+            # Fixed parameters: any key in registered config is immutable.
+            # accepted_params only controls which keys are *allowed*, not which
+            # may change a registered value (Phase 1 contract).
             conflict = False
             for key, val in config.items():
-                if key in registered and registered[key] != val and key not in accepted_set:
+                if key in registered and registered[key] != val:
                     last_error = (
                         f"Invalid configuration for concept {concept!r}: "
                         f"cannot override fixed parameter {key!r} "
@@ -161,22 +174,34 @@ class CapabilityRegistry:
 
             effective = dict(registered)
             if accepted is not None:
+                accepted_set = set(accepted)
                 for key, val in config.items():
-                    if key in accepted_set:
+                    # Only merge non-fixed accepted keys (not already constrained
+                    # by registered). Fixed keys already matched above.
+                    if key in accepted_set and key not in registered:
                         effective[key] = val
 
-            # Swing: validate strengths as positive ints *before* using them
-            # (no silent coercion of floats / bools).
+            # Swing: overridable params live only in accepted_params (registered
+            # config is empty). Apply defaults, then user overrides, then validate.
             if entry.get("implementation") == "swing_pivot":
                 from cpab.detectors.swing import _validate_strength, _validate_tie_policy
 
-                left = _validate_strength(
-                    "left_strength", effective.get("left_strength", 1)
-                )
+                defaults = {
+                    "left_strength": 1,
+                    "right_strength": 1,
+                    "tie_policy": "strict",
+                }
+                merged = dict(defaults)
+                merged.update(effective)
+                if accepted is not None:
+                    for key, val in config.items():
+                        if key in accepted:
+                            merged[key] = val
+                left = _validate_strength("left_strength", merged.get("left_strength", 1))
                 right = _validate_strength(
-                    "right_strength", effective.get("right_strength", 1)
+                    "right_strength", merged.get("right_strength", 1)
                 )
-                policy = _validate_tie_policy(effective.get("tie_policy", "strict"))
+                policy = _validate_tie_policy(merged.get("tie_policy", "strict"))
                 effective = {
                     "left_strength": left,
                     "right_strength": right,
@@ -269,6 +294,9 @@ def build_default_registry() -> CapabilityRegistry:
 
             return factory
 
+        # pattern is a *fixed* registered value (cannot override).
+        # accepted_params=["pattern"] only allows the key to appear; its value
+        # must match the registered pattern (Phase 1 contract).
         reg.register(
             f"talib:{pattern.lower()}",
             concepts=list(dict.fromkeys(concepts)),
@@ -281,11 +309,12 @@ def build_default_registry() -> CapabilityRegistry:
         )
 
     # --- Phase 2A: swing pivot ---
+    # Registered config is empty so left/right/tie_policy are not fixed params.
+    # Defaults and validation are applied in validate_config for swing_pivot.
     def _swing_factory(cfg: Optional[dict[str, Any]] = None) -> PriceActionDetector:
         from cpab.detectors.swing import SwingPivotDetector
 
         c = dict(cfg or {})
-        # SwingPivotDetector validates types; pass through without int()/str() coercion.
         return SwingPivotDetector(
             left_strength=c.get("left_strength", 1),
             right_strength=c.get("right_strength", 1),
@@ -293,16 +322,11 @@ def build_default_registry() -> CapabilityRegistry:
             detector_id="swing_pivot",
         )
 
-    default_swing_cfg = {
-        "left_strength": 1,
-        "right_strength": 1,
-        "tie_policy": "strict",
-    }
     reg.register(
         "swing_pivot",
         concepts=["swing_high", "swing_low", "swing"],
         factory=_swing_factory,
-        config=default_swing_cfg,
+        config={},  # no fixed params — strengths/tie_policy are overridable
         accepted_params=["left_strength", "right_strength", "tie_policy"],
         min_history=3,
         implementation="swing_pivot",
