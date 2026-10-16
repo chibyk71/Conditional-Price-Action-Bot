@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
-from cpab.detectors.equal_levels import EqualLevelsDetector, _validate_tolerance
-from cpab.detectors.registry import build_default_registry, deterministic_config_id
-from cpab.detectors.swing import SwingPivotDetector
-from cpab.models import Candle, Observation
+from cpab.detectors.equal_levels import EqualLevelsDetector
+from cpab.detectors.registry import build_default_registry
+from cpab.models import Candle
 from cpab.core.observation_store import ObservationStore
 
 
@@ -171,37 +168,159 @@ def test_different_swing_configs_cannot_share_levels():
     d2 = EqualLevelsDetector(tolerance=0.2, left_strength=1, right_strength=2)
     o1 = [o for o in d1.detect_all_historical(candles) if o.type == "equal_high_level"]
     o2 = [o for o in d2.detect_all_historical(candles) if o.type == "equal_high_level"]
-    if o1 and o2:
-        assert o1[0].detector_config_id != o2[0].detector_config_id
-        assert o1[0].id != o2[0].id
+    assert len(o1) >= 1
+    assert len(o2) >= 1
+    assert o1[0].detector_config_id != o2[0].detector_config_id
+    assert o1[0].id != o2[0].id
 
 
 # ---------------------------------------------------------------------------
-# C. Grouping and determinism
+# C. Grouping and determinism — explicit tie-breakers
 # ---------------------------------------------------------------------------
 
 
 def test_nearest_existing_level_selected():
+    """Two levels; later swing must touch the nearer representative."""
     candles = _series(
-        [9.0, 10.0, 9.5, 9.2, 10.1, 9.5, 19.0, 20.0, 19.5, 19.2, 20.1, 19.5, 9.5, 10.05, 9.8]
+        [
+            9.0, 10.0, 9.5,
+            9.2, 10.1, 9.5,
+            19.0, 20.0, 19.5,
+            19.2, 20.1, 19.5,
+            9.5, 10.08, 9.8,
+        ]
     )
     d = EqualLevelsDetector(tolerance=0.15, left_strength=1, right_strength=1)
     all_obs = d.detect_all_historical(candles)
     levels = [o for o in all_obs if o.type == "equal_high_level"]
     touches = [o for o in all_obs if o.type == "equal_high_level_touch"]
+    assert len(levels) == 2
+    assert len(touches) >= 1
+    levels_sorted = sorted(levels, key=lambda o: o.payload["representative_price"])
+    near_lvl = levels_sorted[0]
+    far_lvl = levels_sorted[1]
+    assert near_lvl.payload["representative_price"] < 15.0
+    assert far_lvl.payload["representative_price"] > 15.0
+    near_touches = [t for t in touches if abs(t.payload["swing_price"] - 10.08) < 1e-9]
+    assert len(near_touches) == 1
+    assert near_touches[0].payload["level_id"] == near_lvl.payload["level_id"]
+    assert near_touches[0].payload["level_id"] != far_lvl.payload["level_id"]
+
+
+def test_earliest_created_level_wins_distance_tie():
+    """Equidistant levels: earliest-created wins."""
+    candles = _series(
+        [
+            9.0, 10.0, 9.5,
+            9.2, 10.0, 9.5,
+            9.0, 10.0, 9.5,
+            9.2, 10.0, 9.5,
+            9.0, 10.0, 9.5,
+        ]
+    )
+    d = EqualLevelsDetector(tolerance=0.0, left_strength=1, right_strength=1)
+    all_obs = d.detect_all_historical(candles)
+    levels = sorted(
+        [o for o in all_obs if o.type == "equal_high_level"],
+        key=lambda o: (o.confirmed_at or 0, o.id),
+    )
+    touches = [o for o in all_obs if o.type == "equal_high_level_touch"]
     assert len(levels) >= 1
+    earliest = levels[0]
     for t in touches:
-        assert "level_id" in t.payload
-        assert t.payload["level_id"] in {lv.payload["level_id"] for lv in levels}
+        assert t.payload["level_id"] == earliest.payload["level_id"]
+        assert t.payload["representative_price"] == earliest.payload["representative_price"]
+
+
+def test_lex_smallest_level_id_wins_remaining_tie():
+    """Final level-id tie-breaker is exercised under zero-tolerance exact matches."""
+    candles = _series(
+        [
+            9.0, 10.0, 9.5,
+            9.2, 10.0, 9.5,
+            8.5, 10.0, 9.0,
+            9.0, 10.0, 9.5,
+            9.0, 10.0, 9.5,
+        ]
+    )
+    d = EqualLevelsDetector(tolerance=0.0, left_strength=1, right_strength=1)
+    all_obs = d.detect_all_historical(candles)
+    levels = [o for o in all_obs if o.type == "equal_high_level"]
+    touches = [o for o in all_obs if o.type == "equal_high_level_touch"]
+    assert len(levels) >= 1
+    level_ids = {o.payload["level_id"] for o in levels}
+    for t in touches:
+        assert t.payload["level_id"] in level_ids
+
+
+def test_ungrouped_nearest_prior_swing_selected():
+    """New swing pairs with nearest prior within tolerance."""
+    candles = _series(
+        [
+            9.0, 10.0, 9.5,
+            9.0, 10.5, 9.5,
+            9.0, 10.1, 9.5,
+        ]
+    )
+    d = EqualLevelsDetector(tolerance=0.3, left_strength=1, right_strength=1)
+    all_obs = d.detect_all_historical(candles)
+    levels = [o for o in all_obs if o.type == "equal_high_level"]
+    assert len(levels) == 1
+    assert abs(levels[0].payload["representative_price"] - 10.05) < 1e-9
+
+
+def test_ungrouped_earliest_prior_wins_distance_tie():
+    """Equal distances to priors: earliest prior is selected."""
+    candles = _series(
+        [
+            9.0, 10.0, 9.5,
+            9.0, 10.0, 9.5,
+            9.0, 10.0, 9.5,
+        ]
+    )
+    d = EqualLevelsDetector(tolerance=0.0, left_strength=1, right_strength=1)
+    all_obs = d.detect_all_historical(candles)
+    levels = [o for o in all_obs if o.type == "equal_high_level"]
+    assert len(levels) == 1
+    refs = levels[0].payload["supporting_swing_ids"]
+    assert len(refs) == 2
+    assert levels[0].payload["level_id"]
+
+
+def test_ungrouped_stable_swing_id_final_tiebreaker():
+    """Deterministic ungrouped selection under identical prices."""
+    candles = _series(
+        [
+            9.0, 10.0, 9.5,
+            9.0, 10.0, 9.5,
+            9.0, 10.0, 9.5,
+        ]
+    )
+    d = EqualLevelsDetector(tolerance=0.0, left_strength=1, right_strength=1)
+    a = d.detect_all_historical(candles)
+    b = d.detect_all_historical(candles)
+    assert [o.id for o in a] == [o.id for o in b]
+    levels = [o for o in a if o.type == "equal_high_level"]
+    assert len(levels) == 1
 
 
 def test_tolerance_chaining_prevented():
-    candles = _series([9.0, 10.0, 9.5, 9.2, 10.4, 9.5, 9.2, 10.8, 9.5])
+    """C close to B must not join A/B level when far from fixed representative."""
+    candles = _series(
+        [
+            9.0, 10.0, 9.5,
+            9.2, 10.4, 9.5,
+            9.2, 10.8, 9.5,
+        ]
+    )
     d = EqualLevelsDetector(tolerance=0.5, left_strength=1, right_strength=1)
     all_obs = d.detect_all_historical(candles)
+    levels = [o for o in all_obs if o.type == "equal_high_level"]
     touches = [o for o in all_obs if o.type == "equal_high_level_touch"]
-    for t in touches:
-        assert abs(t.payload["swing_price"] - t.payload["representative_price"]) <= 0.5 + 1e-12
+    assert len(levels) == 1
+    assert abs(levels[0].payload["representative_price"] - 10.2) < 1e-9
+    c_touches = [t for t in touches if abs(t.payload["swing_price"] - 10.8) < 1e-9]
+    assert c_touches == []
 
 
 def test_representative_price_fixed_after_creation():
@@ -210,11 +329,43 @@ def test_representative_price_fixed_after_creation():
     all_obs = d.detect_all_historical(candles)
     levels = [o for o in all_obs if o.type == "equal_high_level"]
     touches = [o for o in all_obs if o.type == "equal_high_level_touch"]
-    if levels and touches:
-        rep = levels[0].payload["representative_price"]
-        for t in touches:
-            if t.payload["level_id"] == levels[0].payload["level_id"]:
-                assert t.payload["representative_price"] == rep
+    assert len(levels) == 1
+    rep = levels[0].payload["representative_price"]
+    for t in touches:
+        if t.payload["level_id"] == levels[0].payload["level_id"]:
+            assert t.payload["representative_price"] == rep
+
+
+def test_established_levels_not_automatically_merged():
+    candles = _series(
+        [
+            9.0, 10.0, 9.5,
+            9.2, 10.1, 9.5,
+            19.0, 20.0, 19.5,
+            19.2, 20.1, 19.5,
+        ]
+    )
+    d = EqualLevelsDetector(tolerance=0.15, left_strength=1, right_strength=1)
+    levels = [o for o in d.detect_all_historical(candles) if o.type == "equal_high_level"]
+    assert len(levels) == 2
+    assert len({o.payload["level_id"] for o in levels}) == 2
+
+
+def test_swing_not_assigned_to_multiple_levels():
+    candles = _series([10.0, 12.0, 11.0, 10.5, 12.1, 11.0, 10.5, 12.05, 11.0])
+    d = EqualLevelsDetector(tolerance=0.2, left_strength=1, right_strength=1)
+    all_obs = d.detect_all_historical(candles)
+    seen: dict[str, int] = {}
+    for o in all_obs:
+        if o.type.endswith("_level"):
+            for sid in o.payload.get("supporting_swing_ids", []):
+                seen[sid] = seen.get(sid, 0) + 1
+        elif o.type.endswith("_touch"):
+            sid = o.payload.get("swing_observation_id")
+            if sid:
+                seen[sid] = seen.get(sid, 0) + 1
+    for sid, count in seen.items():
+        assert count == 1, f"swing {sid} assigned {count} times"
 
 
 def test_input_order_does_not_change_results():
@@ -236,8 +387,8 @@ def test_high_and_low_levels_isolated():
     lows = [o for o in all_obs if "low" in o.type]
     for h in highs:
         assert "low" not in h.type
-    for l in lows:
-        assert "high" not in l.type
+    for lo in lows:
+        assert "high" not in lo.type
 
 
 # ---------------------------------------------------------------------------
@@ -250,12 +401,12 @@ def test_level_not_emitted_before_second_swing_confirmed():
     d = EqualLevelsDetector(tolerance=0.2, left_strength=1, right_strength=1)
     all_obs = d.detect_all_historical(candles)
     levels = [o for o in all_obs if o.type == "equal_high_level"]
-    assert levels
+    assert len(levels) == 1
     second_confirm = candles[5].epoch
-    for lvl in levels:
-        assert lvl.confirmed_at == second_confirm
-        assert not lvl.is_eligible_at(candles[4].epoch)
-        assert lvl.is_eligible_at(second_confirm)
+    lvl = levels[0]
+    assert lvl.confirmed_at == second_confirm
+    assert not lvl.is_eligible_at(candles[4].epoch)
+    assert lvl.is_eligible_at(second_confirm)
 
 
 def test_incomplete_candles_not_used():
@@ -300,18 +451,52 @@ def test_gap_prevents_swing_and_thus_level():
 
 
 # ---------------------------------------------------------------------------
-# E. Observation identity and touch behavior
+# E. Observation identity, touch behavior, reconstruction continuity
 # ---------------------------------------------------------------------------
 
 
-def test_level_identity_deterministic():
+def test_level_identity_deterministic_same_full_history():
     candles = _series([10.0, 12.0, 11.0, 10.5, 12.1, 11.0])
     d = EqualLevelsDetector(tolerance=0.2, left_strength=1, right_strength=1)
     a = [o for o in d.detect_all_historical(candles) if o.type == "equal_high_level"]
     b = [o for o in d.detect_all_historical(candles) if o.type == "equal_high_level"]
-    assert a and b
+    assert len(a) == 1 and len(b) == 1
     assert a[0].id == b[0].id
     assert a[0].payload["level_id"] == b[0].payload["level_id"]
+
+
+def test_truncated_history_missing_original_swings_does_not_reinvent_identity():
+    """Truncated window excluding original supporting swings must not recreate their level_id."""
+    full = _series(
+        [
+            9.0, 12.0, 11.0,
+            10.5, 12.1, 11.0,
+            10.0, 15.0, 14.0,
+            13.5, 15.1, 14.0,
+        ]
+    )
+    d = EqualLevelsDetector(tolerance=0.2, left_strength=1, right_strength=1)
+    full_levels = [o for o in d.detect_all_historical(full) if o.type == "equal_high_level"]
+    assert len(full_levels) >= 1
+    original_ids = {o.payload["level_id"] for o in full_levels}
+    truncated = full[-6:]
+    trunc_levels = [o for o in d.detect_all_historical(truncated) if o.type == "equal_high_level"]
+    trunc_ids = {o.payload["level_id"] for o in trunc_levels}
+    assert original_ids.isdisjoint(trunc_ids)
+
+
+def test_prefix_history_preserving_supporting_swings_keeps_identity():
+    """Prefix that still contains both supporting swings reconstructs the same level_id."""
+    full = _series([10.0, 12.0, 11.0, 10.5, 12.1, 11.0, 10.0, 11.0, 10.5])
+    d = EqualLevelsDetector(tolerance=0.2, left_strength=1, right_strength=1)
+    full_levels = [o for o in d.detect_all_historical(full) if o.type == "equal_high_level"]
+    assert len(full_levels) == 1
+    lid = full_levels[0].payload["level_id"]
+    prefix = full[:6]
+    prefix_levels = [o for o in d.detect_all_historical(prefix) if o.type == "equal_high_level"]
+    assert len(prefix_levels) == 1
+    assert prefix_levels[0].payload["level_id"] == lid
+    assert prefix_levels[0].id == full_levels[0].id
 
 
 def test_touch_identity_deterministic_and_store_idempotent():
@@ -330,17 +515,16 @@ def test_touch_does_not_mutate_creation():
     d = EqualLevelsDetector(tolerance=0.2, left_strength=1, right_strength=1)
     all_obs = d.detect_all_historical(candles)
     levels = [o for o in all_obs if o.type == "equal_high_level"]
-    if levels:
-        assert levels[0].payload["touch_count"] == 2
+    assert len(levels) == 1
+    assert levels[0].payload["touch_count"] == 2
 
 
 def test_creation_and_touch_ids_distinct_from_level_id():
     candles = _series([10.0, 12.0, 11.0, 10.5, 12.1, 11.0])
     d = EqualLevelsDetector(tolerance=0.2, left_strength=1, right_strength=1)
     levels = [o for o in d.detect_all_historical(candles) if o.type == "equal_high_level"]
-    assert levels
-    lid = levels[0].payload["level_id"]
-    assert levels[0].id != lid
+    assert len(levels) == 1
+    assert levels[0].id != levels[0].payload["level_id"]
 
 
 # ---------------------------------------------------------------------------
