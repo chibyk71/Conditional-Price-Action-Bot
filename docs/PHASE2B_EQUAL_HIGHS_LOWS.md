@@ -37,7 +37,7 @@ All of the above participate in `detector_config_id`. Different swing configurat
 When a newly confirmed swing is processed:
 
 1. **Existing levels** (same series, direction, detector config): qualify if `|price − representative| ≤ ε`. Select nearest distance; ties → earliest-created level; remaining ties → lexicographically smallest stable level ID.
-2. **Ungrouped prior swings**: if no level qualifies, pair with the nearest eligible prior ungrouped swing (same ties: earliest, then stable swing observation ID).
+2. **Ungrouped prior swings**: if no level qualifies, pair with the nearest eligible prior ungrouped swing (same ties: earliest confirmed_at, then stable swing observation ID).
 
 Rules enforced:
 
@@ -55,21 +55,37 @@ A level becomes observable only when the **second** supporting swing is confirme
 - Developing / incomplete candles are never used.
 - Gaps are not bridged (inherited from SwingPivotDetector window continuity).
 
-## Historical reconstruction
+## Historical reconstruction and identity continuity
 
-The detector reuses `SwingPivotDetector.detect_all_historical` on the closed series, then groups deterministically.
+The detector is **stateless**: it reconstructs confirmed swings via `SwingPivotDetector.detect_all_historical` on the closed series it is given, then groups deterministically. There is no persistent level-state store.
 
-**Minimum history** for any equal-level to become confirmable:
+### Minimum history (lower bound for any equal-level)
 
 \[
 \min\_history = 2 \times (\text{left} + 1 + \text{right}) - 1
 \]
 
-Derivation: one swing needs \(L+1+R\) closed bars; a second distinct confirmable pivot needs additional bars such that two full left/candidate/right windows fit under contiguous spacing. The formula is the lower bound for two non-identical candidates.
+Derivation: one swing needs \(L+1+R\) closed bars; a second distinct confirmable pivot needs additional bars so that two full left/candidate/right windows fit under contiguous spacing.
 
-Callers that need full reconstruction of older levels must supply the entire relevant closed series. If the original supporting swings cannot be reconstructed from available history, level creation is skipped (no invented identity, no persistent level-state storage).
+### What is guaranteed
 
-Repeated processing of the same closed history with the same effective configuration produces identical swing identities, level identities, supporting references, creation observations, and touch observations.
+| Scenario | Guarantee |
+|----------|-----------|
+| Same full closed history, same effective config | Identical swing IDs, level IDs, creation/touch observations, supporting references |
+| Prefix of a series that still contains both original supporting swings of a level | Same `level_id` and creation observation ID for that level |
+| Truncated / rolling window that **excludes** the original supporting swings | That level is **not** recreated. Any new pairing of remaining swings receives a **different** `level_id` (derived from the new pair’s swing observation IDs). No invented identity for a missing historical level. |
+
+### Explicit limitation (Option A)
+
+Identity continuity for a previously established level requires that the supplied candle history still contains the original supporting swings. A rolling market-data window that has aged those bars out cannot reconstruct the original level identity under a pure reconstruction model without persistent state.
+
+This is by design for Phase 2B:
+
+- No persistent level-state storage was introduced.
+- Insufficient or truncated history yields no emission of the original level (or a different identity if a new pair forms from remaining swings).
+- Callers that need long-lived level continuity across truncated windows must retain the original supporting swings (or a future architectural store) outside this detector.
+
+Tests cover both the same-history determinism case and the truncated-history non-reinvention case.
 
 ## Observation payload (creation)
 
