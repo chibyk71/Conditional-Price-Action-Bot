@@ -152,7 +152,14 @@ def test_tolerance_participates_in_config_identity():
 
 
 def test_different_swing_configs_cannot_share_levels():
-    candles = _series([10.0, 12.0, 11.0, 10.5, 12.1, 11.0])
+    """Distinct swing configs yield distinct config ids and observation ids.
+
+    Uses an 8-bar series long enough for right_strength=2 to confirm two
+    independent swing highs (min_history = 2*(1+1+2)-1 = 7).
+    """
+    # Indices: 0=9, 1=12 (swing), 2=11, 3=10.5 → confirm under R=1 and R=2
+    #          4=10, 5=12.1 (swing), 6=11, 7=10.5 → second swing
+    candles = _series([9.0, 12.0, 11.0, 10.5, 10.0, 12.1, 11.0, 10.5])
     d1 = EqualLevelsDetector(tolerance=0.2, left_strength=1, right_strength=1)
     d2 = EqualLevelsDetector(tolerance=0.2, left_strength=1, right_strength=2)
     o1 = [o for o in d1.detect_all_historical(candles) if o.type == "equal_high_level"]
