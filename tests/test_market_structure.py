@@ -70,9 +70,12 @@ def test_hh_higher_high():
 
 
 def test_lh_lower_high():
+    # Strict 1/1 pivots: SH at 15 (idx 1), SH at 14 (idx 4) → LH
+    # Prior fixture was a monotonically declining high series after the first
+    # pivot, which produced only one swing high and could not emit LH.
     candles = _series(
-        [10.0, 15.0, 14.0, 13.0, 12.0, 11.0],
-        lows=[9.0, 13.0, 12.0, 11.0, 10.0, 9.0],
+        [10.0, 15.0, 14.0, 13.0, 14.0, 13.0],
+        lows=[9.0, 12.0, 11.0, 10.0, 11.0, 10.0],
     )
     d = MarketStructureDetector(left_strength=1, right_strength=1, tie_policy="strict")
     obs = d.detect_all_historical(candles)
@@ -81,12 +84,16 @@ def test_lh_lower_high():
     o = lh[0]
     assert o.payload["classification"] == "lh"
     assert o.payload["source_price"] < o.payload["reference_price"]
+    assert o.payload["source_price"] == 14.0
+    assert o.payload["reference_price"] == 15.0
 
 
 def test_hl_higher_low():
+    # Strict 1/1 pivots: SL at 8.0 (idx 1), SL at 8.5 (idx 3) → HL
+    # Prior fixture produced SL at 8.0 then 7.5, which is LL not HL.
     candles = _series(
-        [12.0, 11.0, 13.0, 12.0, 14.0, 13.0],
-        lows=[10.0, 8.0, 9.0, 7.5, 10.0, 9.0],
+        [12.0, 11.0, 12.5, 12.0, 13.0, 12.5],
+        lows=[10.0, 8.0, 9.0, 8.5, 9.5, 9.0],
     )
     d = MarketStructureDetector(left_strength=1, right_strength=1, tie_policy="strict")
     obs = d.detect_all_historical(candles)
@@ -95,6 +102,8 @@ def test_hl_higher_low():
     o = hl[0]
     assert o.payload["classification"] == "hl"
     assert o.payload["source_price"] > o.payload["reference_price"]
+    assert o.payload["source_price"] == 8.5
+    assert o.payload["reference_price"] == 8.0
 
 
 def test_ll_lower_low():
