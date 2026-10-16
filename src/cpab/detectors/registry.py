@@ -9,6 +9,9 @@ overridable configuration. TA-Lib pattern values remain fixed at registration.
 
 Phase 2B: equal_levels accepts tolerance (required), left_strength, right_strength,
 tie_policy. Tolerance has no silent default.
+
+Phase 2C: market_structure accepts left_strength, right_strength, tie_policy
+(forwarded to internal SwingPivotDetector).
 """
 
 from __future__ import annotations
@@ -139,8 +142,8 @@ class CapabilityRegistry:
             different value raises ValueError (cannot override).
           - Keys in ``accepted_params`` but not fixed in registered config may be
             supplied by the caller and become part of the effective config.
-          - Swing / equal_levels apply documented defaults for missing overridable keys
-            (except equal_levels tolerance, which is required).
+          - Swing / equal_levels / market_structure apply documented defaults for
+            missing overridable keys (except equal_levels tolerance, which is required).
         """
         if concept not in self._concept_index:
             raise ValueError(f"Unsupported concept: {concept!r}")
@@ -160,7 +163,6 @@ class CapabilityRegistry:
                     )
                     continue
 
-            # Fixed parameters: any key in registered config is immutable.
             conflict = False
             for key, val in config.items():
                 if key in registered and registered[key] != val:
@@ -212,7 +214,6 @@ class CapabilityRegistry:
                 from cpab.detectors.swing import _validate_strength, _validate_tie_policy
                 from cpab.detectors.equal_levels import _validate_tolerance
 
-                # tolerance is required — no silent default
                 if "tolerance" not in config and "tolerance" not in effective:
                     last_error = (
                         f"Invalid configuration for concept {concept!r}: "
@@ -250,6 +251,32 @@ class CapabilityRegistry:
                 }
                 s = left + 1 + right
                 mh = 2 * s - 1
+            elif impl == "market_structure":
+                from cpab.detectors.swing import _validate_strength, _validate_tie_policy
+
+                defaults = {
+                    "left_strength": 1,
+                    "right_strength": 1,
+                    "tie_policy": "strict",
+                }
+                merged = dict(defaults)
+                merged.update(effective)
+                if accepted is not None:
+                    for key, val in config.items():
+                        if key in accepted:
+                            merged[key] = val
+                left = _validate_strength("left_strength", merged.get("left_strength", 1))
+                right = _validate_strength(
+                    "right_strength", merged.get("right_strength", 1)
+                )
+                policy = _validate_tie_policy(merged.get("tie_policy", "strict"))
+                effective = {
+                    "left_strength": left,
+                    "right_strength": right,
+                    "tie_policy": policy,
+                }
+                # Earliest two same-type unequal swings: left + 2*right + 2
+                mh = left + 2 * right + 2
             else:
                 mh = entry["min_history"]
                 if mh is None and entry.get("pattern"):
@@ -284,7 +311,6 @@ class CapabilityRegistry:
         factory = entry["factory"]
         effective = info.config
 
-        # Explicit signature check — do not catch TypeError from factory body.
         if _factory_accepts_config(factory):
             det = factory(effective)
         else:
@@ -299,7 +325,6 @@ class CapabilityRegistry:
                 )
         if hasattr(det, "_detector_config_id") and getattr(det, "_detector_config_id") is None:
             det._detector_config_id = info.detector_config_id  # type: ignore[attr-defined]
-        # Always align config id from registry validation for configured detectors
         if hasattr(det, "_detector_config_id"):
             det._detector_config_id = info.detector_config_id  # type: ignore[attr-defined]
         return det, info
@@ -339,7 +364,6 @@ def build_default_registry() -> CapabilityRegistry:
 
             return factory
 
-        # pattern is a *fixed* registered value (cannot override).
         reg.register(
             f"talib:{pattern.lower()}",
             concepts=list(dict.fromkeys(concepts)),
@@ -351,7 +375,6 @@ def build_default_registry() -> CapabilityRegistry:
             pattern=pattern,
         )
 
-    # --- Phase 2A: swing pivot ---
     def _swing_factory(cfg: Optional[dict[str, Any]] = None) -> PriceActionDetector:
         from cpab.detectors.swing import SwingPivotDetector
 
@@ -367,13 +390,12 @@ def build_default_registry() -> CapabilityRegistry:
         "swing_pivot",
         concepts=["swing_high", "swing_low", "swing"],
         factory=_swing_factory,
-        config={},  # no fixed params — strengths/tie_policy are overridable
+        config={},
         accepted_params=["left_strength", "right_strength", "tie_policy"],
         min_history=3,
         implementation="swing_pivot",
     )
 
-    # --- Phase 2B: equal highs / equal lows ---
     def _equal_levels_factory(cfg: Optional[dict[str, Any]] = None) -> PriceActionDetector:
         from cpab.detectors.equal_levels import EqualLevelsDetector
 
@@ -392,10 +414,41 @@ def build_default_registry() -> CapabilityRegistry:
         "equal_levels",
         concepts=["equal_high", "equal_low", "equal_level", "eqh", "eql"],
         factory=_equal_levels_factory,
-        config={},  # no fixed params
+        config={},
         accepted_params=["tolerance", "left_strength", "right_strength", "tie_policy"],
         min_history=5,
         implementation="equal_levels",
+    )
+
+    def _market_structure_factory(cfg: Optional[dict[str, Any]] = None) -> PriceActionDetector:
+        from cpab.detectors.market_structure import MarketStructureDetector
+
+        c = dict(cfg or {})
+        return MarketStructureDetector(
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
+            detector_id="market_structure",
+        )
+
+    reg.register(
+        "market_structure",
+        concepts=[
+            "market_structure",
+            "hh",
+            "hl",
+            "lh",
+            "ll",
+            "higher_high",
+            "higher_low",
+            "lower_high",
+            "lower_low",
+        ],
+        factory=_market_structure_factory,
+        config={},
+        accepted_params=["left_strength", "right_strength", "tie_policy"],
+        min_history=5,
+        implementation="market_structure",
     )
 
     return reg
