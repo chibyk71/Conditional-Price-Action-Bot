@@ -108,11 +108,20 @@ class MarketStructureDetector(PriceActionDetector):
         """
         Minimum closed candles for any classification to become confirmable.
 
-        Requires at least two independently confirmable swings of the same type.
-        Lower bound mirrors equal_levels: 2 * (left + 1 + right) - 1.
+        Two same-type swings with unequal prices (required for HH/LH/HL/LL) cannot
+        both qualify when the second candidate lies inside the first candidate's
+        right-side window. Earliest layout:
+
+          first candidate index  = left_strength
+          second candidate index = left_strength + right_strength + 1
+          series length          = second + right_strength + 1
+                                 = left_strength + 2 * right_strength + 2
+
+        For left=right=1 this equals 5 (same as the prior 2*(L+1+R)-1 bound).
+        For left=right=2 this equals 8 (not 9), matching the earliest strict
+        two-swing-high sequence on contiguous bars.
         """
-        s = self._left + 1 + self._right
-        return 2 * s - 1
+        return self._left + 2 * self._right + 2
 
     def config_dict(self) -> dict[str, Any]:
         return {
