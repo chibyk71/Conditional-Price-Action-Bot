@@ -71,8 +71,6 @@ def test_hh_higher_high():
 
 def test_lh_lower_high():
     # Strict 1/1 pivots: SH at 15 (idx 1), SH at 14 (idx 4) → LH
-    # Prior fixture was a monotonically declining high series after the first
-    # pivot, which produced only one swing high and could not emit LH.
     candles = _series(
         [10.0, 15.0, 14.0, 13.0, 14.0, 13.0],
         lows=[9.0, 12.0, 11.0, 10.0, 11.0, 10.0],
@@ -90,7 +88,6 @@ def test_lh_lower_high():
 
 def test_hl_higher_low():
     # Strict 1/1 pivots: SL at 8.0 (idx 1), SL at 8.5 (idx 3) → HL
-    # Prior fixture produced SL at 8.0 then 7.5, which is LL not HL.
     candles = _series(
         [12.0, 11.0, 12.5, 12.0, 13.0, 12.5],
         lows=[10.0, 8.0, 9.0, 8.5, 9.5, 9.0],
@@ -138,6 +135,53 @@ def test_insufficient_history_no_emit():
     d = MarketStructureDetector(left_strength=1, right_strength=1)
     assert d.detect(candles) == []
     assert d.min_history == 5
+
+
+def test_min_history_formula():
+    """min_history = left + 2*right + 2 (earliest two same-type unequal swings)."""
+    assert MarketStructureDetector(left_strength=1, right_strength=1).min_history == 5
+    assert MarketStructureDetector(left_strength=2, right_strength=2).min_history == 8
+    assert MarketStructureDetector(left_strength=2, right_strength=1).min_history == 6
+    assert MarketStructureDetector(left_strength=1, right_strength=2).min_history == 7
+
+
+def test_earliest_two_swing_highs_l2_r2_eight_bars():
+    """
+    left=2, right=2: two strict swing highs on exactly 8 bars must yield HH.
+
+    highs: [1, 2, 5, 3, 4, 6, 3, 2]
+      SH at idx 2 (price 5, confirmed at 4)
+      SH at idx 5 (price 6, confirmed at 7) → HH
+
+    Prior formula required 9 bars and would miss this classification.
+    """
+    highs = [1.0, 2.0, 5.0, 3.0, 4.0, 6.0, 3.0, 2.0]
+    lows = [h - 0.5 for h in highs]
+    candles = _series(highs, lows)
+    assert len(candles) == 8
+
+    d = MarketStructureDetector(left_strength=2, right_strength=2, tie_policy="strict")
+    assert d.min_history == 8
+
+    swing = SwingPivotDetector(left_strength=2, right_strength=2, tie_policy="strict")
+    swing_highs = [o for o in swing.detect_all_historical(candles) if o.type == "swing_high"]
+    assert len(swing_highs) == 2
+    prices = sorted(float(o.payload["price"]) for o in swing_highs)
+    assert prices == [5.0, 6.0]
+
+    hist = d.detect_all_historical(candles)
+    hh = [o for o in hist if o.variant == "hh"]
+    assert len(hh) == 1
+    assert hh[0].payload["source_price"] == 6.0
+    assert hh[0].payload["reference_price"] == 5.0
+    assert hh[0].confirmed_at == candles[7].epoch
+
+    # Incremental: classification becomes available at the second swing's confirmation bar
+    incr = d.detect(candles)
+    assert len(incr) == 1
+    assert incr[0].variant == "hh"
+    assert incr[0].confirmed_at == candles[-1].epoch
+    assert incr[0].id == hh[0].id
 
 
 def test_equal_highs_no_classification_reference_advances():
@@ -274,7 +318,7 @@ def test_registry_integration():
     assert det2.left_strength == 2
     assert det2.right_strength == 2
     assert det2.tie_policy == "first"
-    assert info2.min_history == 9
+    assert info2.min_history == 8  # left + 2*right + 2
     assert info2.detector_config_id == deterministic_config_id(
         {"left_strength": 2, "right_strength": 2, "tie_policy": "first"}
     )
