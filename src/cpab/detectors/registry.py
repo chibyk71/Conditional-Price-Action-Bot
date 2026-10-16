@@ -275,8 +275,8 @@ class CapabilityRegistry:
                     "right_strength": right,
                     "tie_policy": policy,
                 }
-                s = left + 1 + right
-                mh = 2 * s - 1
+                # Earliest two same-type unequal swings: left + 2*right + 2
+                mh = left + 2 * right + 2
             else:
                 mh = entry["min_history"]
                 if mh is None and entry.get("pattern"):
