@@ -185,34 +185,81 @@ def test_earliest_two_swing_highs_l2_r2_eight_bars():
 
 
 def test_equal_highs_no_classification_reference_advances():
+    """
+    Strict 1/1 swing highs:
+      H1=100 → no classification (first)
+      H2=105 → hh vs 100
+      H3=105 → equal: no classification; reference advances to H3
+      H4=103 → lh vs 105 (not vs 100)
+    """
     highs = [
         98.0, 100.0, 99.0, 101.0, 105.0, 104.0, 102.0, 105.0, 104.0, 101.0, 103.0, 102.0,
     ]
     lows = [h - 2.0 for h in highs]
     candles = _series(highs, lows)
     d = MarketStructureDetector(left_strength=1, right_strength=1, tie_policy="strict")
+
+    swing = SwingPivotDetector(left_strength=1, right_strength=1, tie_policy="strict")
+    swing_highs = sorted(
+        [o for o in swing.detect_all_historical(candles) if o.type == "swing_high"],
+        key=lambda o: (
+            o.confirmed_at if o.confirmed_at is not None else 0,
+            o.event_time if o.event_time is not None else o.candle_epoch,
+            o.id,
+        ),
+    )
+    swing_prices = [float(o.payload["price"]) for o in swing_highs]
+    assert swing_prices == [100.0, 105.0, 105.0, 103.0]
+
     obs = d.detect_all_historical(candles)
-    classifications = [
+    high_class = [
         (o.variant, o.payload["source_price"], o.payload["reference_price"])
         for o in obs
-        if o.type == "market_structure"
+        if o.type == "market_structure" and o.variant in ("hh", "lh")
     ]
-    for v, sp, rp in classifications:
-        assert sp != rp
-    lh_103 = [c for c in classifications if c[0] == "lh" and c[1] == 103.0]
-    if lh_103:
-        assert lh_103[0][2] == 105.0
+    # Equal consecutive highs must not emit a classification
+    assert all(sp != rp for _, sp, rp in high_class)
+    assert ("hh", 105.0, 100.0) in high_class
+    # Reference advanced past the equal high: 103 is compared to 105, not 100
+    assert ("lh", 103.0, 105.0) in high_class
+    assert ("lh", 103.0, 100.0) not in high_class
 
 
-def test_equal_lows_no_classification():
-    candles = _series(
-        [12.0, 11.0, 13.0, 12.0, 11.0, 10.0],
-        lows=[10.0, 8.0, 9.0, 8.0, 9.0, 7.0],
-    )
+def test_equal_lows_no_classification_reference_advances():
+    """
+    Strict 1/1 swing lows:
+      L1=8.0 → no classification (first)
+      L2=8.0 → equal: no classification; reference advances to L2
+      L3=7.0 → ll vs 8.0 (the advanced equal reference)
+    """
+    highs = [12.0, 11.0, 13.0, 12.0, 11.0, 10.0, 11.0]
+    lows = [10.0, 8.0, 9.0, 8.0, 9.0, 7.0, 8.0]
+    candles = _series(highs, lows)
     d = MarketStructureDetector(left_strength=1, right_strength=1, tie_policy="strict")
+
+    swing = SwingPivotDetector(left_strength=1, right_strength=1, tie_policy="strict")
+    swing_lows = sorted(
+        [o for o in swing.detect_all_historical(candles) if o.type == "swing_low"],
+        key=lambda o: (
+            o.confirmed_at if o.confirmed_at is not None else 0,
+            o.event_time if o.event_time is not None else o.candle_epoch,
+            o.id,
+        ),
+    )
+    swing_prices = [float(o.payload["price"]) for o in swing_lows]
+    assert swing_prices == [8.0, 8.0, 7.0]
+
     obs = d.detect_all_historical(candles)
-    for o in obs:
-        assert o.payload["source_price"] != o.payload["reference_price"]
+    low_class = [
+        (o.variant, o.payload["source_price"], o.payload["reference_price"])
+        for o in obs
+        if o.type == "market_structure" and o.variant in ("hl", "ll")
+    ]
+    assert all(sp != rp for _, sp, rp in low_class)
+    # Equal consecutive lows emit nothing; next unequal compares against advanced ref
+    assert ("ll", 7.0, 8.0) in low_class
+    # Only one low-side classification from this three-swing stream
+    assert len(low_class) == 1
 
 
 def test_highs_and_lows_independent():
