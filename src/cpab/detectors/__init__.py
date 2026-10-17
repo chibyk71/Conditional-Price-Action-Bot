@@ -12,6 +12,7 @@ from cpab.detectors.swing import SwingPivotDetector
 from cpab.detectors.equal_levels import EqualLevelsDetector
 from cpab.detectors.market_structure import MarketStructureDetector
 from cpab.detectors.structure_break import StructureBreakDetector
+from cpab.detectors.support_resistance import SupportResistanceZoneDetector
 
 __all__ = [
     "PriceActionDetector",
@@ -21,6 +22,7 @@ __all__ = [
     "EqualLevelsDetector",
     "MarketStructureDetector",
     "StructureBreakDetector",
+    "SupportResistanceZoneDetector",
     "evaluate_raw",
     "AdapterOutcomeKind",
     "CapabilityRegistry",
