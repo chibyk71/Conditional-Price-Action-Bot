@@ -74,11 +74,17 @@ def _stable_break_id(
     direction: str,
     variant: str,
     broken_swing_id: str,
+    history_complete: bool,
 ) -> str:
     """
-    Deterministic identity including the broken swing so multiple breaks on the
-    same candle (different levels) remain distinct and store-idempotent.
+    Deterministic identity including the broken swing and history-completeness
+    mode so:
+
+    * multiple breaks on the same candle (different levels) remain distinct;
+    * complete vs truncated reconstructions of the same objective crossing do
+      not collide in ObservationStore (payloads differ on prior_structural_state).
     """
+    hc = "hc1" if history_complete else "hc0"
     parts = [
         "structure_break",
         symbol,
@@ -91,6 +97,7 @@ def _stable_break_id(
         direction,
         variant,
         broken_swing_id,
+        hc,
     ]
     return "|".join(parts)
 
@@ -411,6 +418,7 @@ class StructureBreakDetector(PriceActionDetector):
             direction=direction,
             variant=variant,
             broken_swing_id=broken_swing_id,
+            history_complete=history_complete,
         )
 
         return Observation.create(
