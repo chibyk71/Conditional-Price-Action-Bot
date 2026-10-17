@@ -12,6 +12,9 @@ tie_policy. Tolerance has no silent default.
 
 Phase 2C: market_structure accepts left_strength, right_strength, tie_policy
 (forwarded to internal SwingPivotDetector).
+
+Phase 2D: structure_break accepts left_strength, right_strength, tie_policy
+(forwarded to internal SwingPivotDetector for breakable levels).
 """
 
 from __future__ import annotations
@@ -142,8 +145,9 @@ class CapabilityRegistry:
             different value raises ValueError (cannot override).
           - Keys in ``accepted_params`` but not fixed in registered config may be
             supplied by the caller and become part of the effective config.
-          - Swing / equal_levels / market_structure apply documented defaults for
-            missing overridable keys (except equal_levels tolerance, which is required).
+          - Swing / equal_levels / market_structure / structure_break apply
+            documented defaults for missing overridable keys (except equal_levels
+            tolerance, which is required).
         """
         if concept not in self._concept_index:
             raise ValueError(f"Unsupported concept: {concept!r}")
@@ -275,8 +279,32 @@ class CapabilityRegistry:
                     "right_strength": right,
                     "tie_policy": policy,
                 }
-                # Earliest two same-type unequal swings: left + 2*right + 2
                 mh = left + 2 * right + 2
+            elif impl == "structure_break":
+                from cpab.detectors.swing import _validate_strength, _validate_tie_policy
+
+                defaults = {
+                    "left_strength": 1,
+                    "right_strength": 1,
+                    "tie_policy": "strict",
+                }
+                merged = dict(defaults)
+                merged.update(effective)
+                if accepted is not None:
+                    for key, val in config.items():
+                        if key in accepted:
+                            merged[key] = val
+                left = _validate_strength("left_strength", merged.get("left_strength", 1))
+                right = _validate_strength(
+                    "right_strength", merged.get("right_strength", 1)
+                )
+                policy = _validate_tie_policy(merged.get("tie_policy", "strict"))
+                effective = {
+                    "left_strength": left,
+                    "right_strength": right,
+                    "tie_policy": policy,
+                }
+                mh = left + 1 + right + 1
             else:
                 mh = entry["min_history"]
                 if mh is None and entry.get("pattern"):
@@ -449,6 +477,33 @@ def build_default_registry() -> CapabilityRegistry:
         accepted_params=["left_strength", "right_strength", "tie_policy"],
         min_history=5,
         implementation="market_structure",
+    )
+
+    def _structure_break_factory(cfg: Optional[dict[str, Any]] = None) -> PriceActionDetector:
+        from cpab.detectors.structure_break import StructureBreakDetector
+
+        c = dict(cfg or {})
+        return StructureBreakDetector(
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
+            detector_id="structure_break",
+        )
+
+    reg.register(
+        "structure_break",
+        concepts=[
+            "structure_break",
+            "bos",
+            "choch",
+            "break_of_structure",
+            "change_of_character",
+        ],
+        factory=_structure_break_factory,
+        config={},
+        accepted_params=["left_strength", "right_strength", "tie_policy"],
+        min_history=4,
+        implementation="structure_break",
     )
 
     return reg
