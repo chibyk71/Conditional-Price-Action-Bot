@@ -62,6 +62,26 @@ def _bullish_break_fixture() -> list[Candle]:
     return _series_from_ohlc(rows)
 
 
+def _multi_strength_break_fixture() -> list[Candle]:
+    """
+    Series that produces a bullish structure break under both
+    left_strength=1,right_strength=1 and left_strength=2,right_strength=1.
+
+    SH candidate near the middle with two left bars below and one right bar
+    below, then a later close above the SH.
+    """
+    rows = [
+        (9.5, 9.8, 9.0, 9.5),    # left2 for L=2
+        (9.5, 10.0, 9.2, 9.8),   # left1
+        (9.8, 12.0, 9.5, 11.0),  # SH = 12.0
+        (11.0, 11.2, 10.0, 10.5),  # right / confirm
+        (10.5, 10.8, 10.0, 10.2),
+        (10.2, 10.5, 10.0, 10.1),
+        (10.1, 13.5, 10.0, 13.0),  # close-cross above 12
+    ]
+    return _series_from_ohlc(rows)
+
+
 def test_truncated_history_defaults_to_unknown_prior():
     candles = _bullish_break_fixture()
     d = StructureBreakDetector(left_strength=1, right_strength=1)
@@ -80,6 +100,32 @@ def test_history_complete_true_uses_neutral_prior():
     obs = d.detect_all_historical(candles, history_complete=True)
     assert obs[0].payload["prior_structural_state"] == "neutral"
     assert obs[0].payload["history_complete"] is True
+
+
+def test_history_complete_modes_have_distinct_stable_ids():
+    """
+    Same objective crossing under history_complete True vs False differs in
+    prior_structural_state payload; stable IDs must differ so ObservationStore
+    first-write-wins cannot silently drop one mode.
+    """
+    candles = _bullish_break_fixture()
+    d = StructureBreakDetector(left_strength=1, right_strength=1)
+    complete = d.detect_all_historical(candles, history_complete=True)
+    truncated = d.detect_all_historical(candles, history_complete=False)
+    assert complete and truncated
+    assert complete[0].id != truncated[0].id
+    assert complete[0].payload["prior_structural_state"] == "neutral"
+    assert truncated[0].payload["prior_structural_state"] == "unknown"
+    assert complete[0].payload["history_complete"] is True
+    assert truncated[0].payload["history_complete"] is False
+
+    store = ObservationStore()
+    assert store.accept(complete) == len(complete)
+    # Truncated-mode records must still insert (distinct ids).
+    assert store.accept(truncated) == len(truncated)
+    # Re-accept is idempotent for each mode.
+    assert store.accept(complete) == 0
+    assert store.accept(truncated) == 0
 
 
 def test_unconfirmed_swing_cannot_trigger_break():
@@ -205,18 +251,20 @@ def test_timeframe_isolation():
 
 
 def test_detector_config_isolation_stable_ids():
-    candles = _bullish_break_fixture()
+    candles = _multi_strength_break_fixture()
     d1 = StructureBreakDetector(left_strength=1, right_strength=1, tie_policy="strict")
     d2 = StructureBreakDetector(left_strength=2, right_strength=1, tie_policy="strict")
     a = d1.detect_all_historical(candles, history_complete=True)
     b = d2.detect_all_historical(candles, history_complete=True)
-    if a and b:
-        assert a[0].detector_config_id != b[0].detector_config_id
-        assert a[0].id != b[0].id
+    assert a, "fixture must emit under left_strength=1"
+    assert b, "fixture must emit under left_strength=2"
+    assert a[0].detector_config_id != b[0].detector_config_id
+    assert a[0].id != b[0].id
     store = ObservationStore()
-    store.accept(a)
+    assert store.accept(a) == len(a)
     assert store.accept(a) == 0
     assert store.accept(b) == len(b)
+    assert store.accept(b) == 0
 
 
 def test_multiple_crossed_levels_at_most_one_each_deterministic_order():
