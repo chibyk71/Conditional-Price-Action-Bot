@@ -100,7 +100,12 @@ Unknown timeframe labels reject continuity (same as swing windows).
 
 Payload includes: `broken_level_price`, `break_direction`, `event_variant`, `source_swing_id`, `source_swing_event_time`, `source_swing_confirmed_at`, `previous_close`, `breakout_close`, `prior_structural_state`, `resulting_structural_state`, `history_complete`, and swing config fields.
 
-Stable event IDs include the broken swing id so multiple breaks on the same candle remain distinct. ObservationStore insertion is idempotent.
+Stable event IDs include the broken swing id **and** the `history_complete` mode (`hc1` / `hc0`) so:
+
+- multiple breaks on the same candle remain distinct;
+- complete vs truncated reconstructions of the same objective crossing do not share an ID (payloads differ on `prior_structural_state`; ObservationStore first-write-wins cannot silently drop one mode).
+
+ObservationStore insertion is idempotent per mode.
 
 ## Configuration
 
