@@ -32,26 +32,37 @@ Completed candles only. Forming candles never trigger events.
 - A newly confirmed level does not trigger a break merely because price is already beyond it without a valid prior-side close.
 - No inference through missing candles.
 
-### Structural state
+### Structural state and history completeness
 
 Independent reconstruction per `(symbol, timeframe, effective detector configuration)`.
 
-Initial state: **neutral**. Directional states: **bullish**, **bearish**.
+Reconstruction **never invents** structural events outside the supplied closed series. Whether the starting structural state is *known* is controlled by the keyword-only flag `history_complete` on `detect` / `detect_all_historical`:
+
+| `history_complete` | Starting state | First in-window break |
+|--------------------|----------------|------------------------|
+| `True` | **neutral** (caller asserts complete structural coverage from known inception) | BOS under the locked table; `prior_structural_state="neutral"` |
+| `False` (default) | **unknown** | Objective crossing still emits; `prior_structural_state="unknown"`; variant is in-window direction establishment — **not** proof that no earlier break existed outside the window |
+
+Default is `False` so a truncated rolling window is not silently treated as structural inception.
+
+Directional states after establishment: **bullish**, **bearish**.
 
 | Previous state | Break direction | Event variant | Resulting state |
 |----------------|-----------------|---------------|-----------------|
-| neutral        | bullish         | BOS           | bullish         |
-| neutral        | bearish         | BOS           | bearish         |
-| bullish        | bullish         | BOS           | bullish         |
-| bullish        | bearish         | CHoCH         | bearish         |
-| bearish        | bearish         | BOS           | bearish         |
-| bearish        | bullish         | CHoCH         | bullish         |
+| neutral / unknown (first) | bullish | BOS | bullish |
+| neutral / unknown (first) | bearish | BOS | bearish |
+| bullish | bullish | BOS | bullish |
+| bullish | bearish | CHoCH | bearish |
+| bearish | bearish | BOS | bearish |
+| bearish | bullish | CHoCH | bullish |
 
-The first confirmed break establishes direction and is classified as BOS.
+Payload includes `history_complete` so consumers can distinguish known-neutral BOS from truncated-window direction establishment.
+
+**Caller impact:** engines that supply a full history from series inception (or otherwise know prior state is neutral) should pass `history_complete=True`. Rolling or truncated windows should leave the default `False`.
 
 ### Multiple and simultaneous breaks
 
-**Same direction, multiple levels:** each crossed level produces its own observation. Order within a direction is stable: `(level.confirmed_at, level.event_time, swing.id)`.
+**Same direction, multiple levels:** each crossed level produces its own observation. Order within a direction is stable: `(level.confirmed_at, level.event_time, swing.id)`. State transitions are applied in that order on the same candle.
 
 **Bullish and bearish on the same candle:**
 
@@ -87,7 +98,7 @@ Unknown timeframe labels reject continuity (same as swing windows).
 | `detector_id` | `structure_break` |
 | `detector_config_id` | deterministic from effective swing config |
 
-Payload includes: `broken_level_price`, `break_direction`, `event_variant`, `source_swing_id`, `source_swing_event_time`, `source_swing_confirmed_at`, `previous_close`, `breakout_close`, `prior_structural_state`, `resulting_structural_state`, and swing config fields.
+Payload includes: `broken_level_price`, `break_direction`, `event_variant`, `source_swing_id`, `source_swing_event_time`, `source_swing_confirmed_at`, `previous_close`, `breakout_close`, `prior_structural_state`, `resulting_structural_state`, `history_complete`, and swing config fields.
 
 Stable event IDs include the broken swing id so multiple breaks on the same candle remain distinct. ObservationStore insertion is idempotent.
 
@@ -109,7 +120,7 @@ No wick-based break mode or equal-level break mode in V1.
 
 - `detect_all_historical()` reconstructs pure structural state from closed history (no persistent store).
 - `detect()` emits only events whose `confirmed_at` equals the latest closed bar's open epoch.
-- Repeated runs produce identical observations and stable IDs.
+- Repeated runs produce identical observations and stable IDs for the same `history_complete` flag.
 - Past event classifications are never revised using future candles.
 
 ## Scope exclusions
