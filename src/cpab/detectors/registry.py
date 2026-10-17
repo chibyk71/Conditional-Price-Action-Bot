@@ -260,7 +260,6 @@ class CapabilityRegistry:
                 mh = 2 * s - 1
             elif impl == "market_structure":
                 from cpab.detectors.swing import _validate_strength, _validate_tie_policy
-                from cpab.detectors.swing import _validate_strength, _validate_tie_policy
 
                 defaults = {
                     "left_strength": 1,
