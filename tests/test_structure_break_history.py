@@ -1,0 +1,227 @@
+"""Phase 2D follow-up: history completeness and review acceptance tests."""
+
+from __future__ import annotations
+
+import pytest
+
+from cpab.detectors.structure_break import StructureBreakDetector
+from cpab.detectors.swing import SwingPivotDetector
+from cpab.detectors.registry import build_default_registry, deterministic_config_id
+from cpab.models import Candle
+from cpab.core.observation_store import ObservationStore
+
+
+def _c(
+    epoch: int,
+    o: float,
+    h: float,
+    l: float,
+    c: float,
+    *,
+    symbol: str = "R_100",
+    timeframe: str = "1m",
+    is_closed: bool = True,
+) -> Candle:
+    return Candle(
+        symbol=symbol,
+        timeframe=timeframe,
+        epoch=epoch,
+        open=o,
+        high=h,
+        low=l,
+        close=c,
+        is_closed=is_closed,
+    )
+
+
+def _series_from_ohlc(
+    rows: list[tuple[float, float, float, float]],
+    start: int = 1_700_000_000,
+    *,
+    step: int = 60,
+    timeframe: str = "1m",
+    symbol: str = "R_100",
+) -> list[Candle]:
+    out = []
+    for i, (o, h, l, c) in enumerate(rows):
+        out.append(
+            _c(start + i * step, o, h, l, c, symbol=symbol, timeframe=timeframe)
+        )
+    return out
+
+
+def _bullish_break_fixture() -> list[Candle]:
+    rows = [
+        (10.0, 10.5, 9.5, 10.0),
+        (10.0, 12.0, 9.8, 11.0),
+        (11.0, 11.2, 10.0, 10.5),
+        (10.5, 10.8, 10.0, 10.2),
+        (10.2, 10.5, 10.0, 10.1),
+        (10.1, 13.5, 10.0, 13.0),
+    ]
+    return _series_from_ohlc(rows)
+
+
+def test_truncated_history_defaults_to_unknown_prior():
+    candles = _bullish_break_fixture()
+    d = StructureBreakDetector(left_strength=1, right_strength=1)
+    obs = d.detect_all_historical(candles)
+    bull = [o for o in obs if o.direction == "bullish"]
+    assert len(bull) >= 1
+    assert bull[0].payload["prior_structural_state"] == "unknown"
+    assert bull[0].payload["history_complete"] is False
+    assert bull[0].payload["resulting_structural_state"] == "bullish"
+    assert bull[0].variant == "bos"
+
+
+def test_history_complete_true_uses_neutral_prior():
+    candles = _bullish_break_fixture()
+    d = StructureBreakDetector(left_strength=1, right_strength=1)
+    obs = d.detect_all_historical(candles, history_complete=True)
+    assert obs[0].payload["prior_structural_state"] == "neutral"
+    assert obs[0].payload["history_complete"] is True
+
+
+def test_unconfirmed_swing_cannot_trigger_break():
+    rows = [
+        (10.0, 10.5, 9.5, 10.0),
+        (10.0, 12.0, 9.8, 11.0),
+        (11.0, 13.0, 10.5, 12.5),
+    ]
+    candles = _series_from_ohlc(rows)
+    candles[-1] = Candle(
+        symbol=candles[-1].symbol,
+        timeframe=candles[-1].timeframe,
+        epoch=candles[-1].epoch,
+        open=candles[-1].open,
+        high=candles[-1].high,
+        low=candles[-1].low,
+        close=candles[-1].close,
+        is_closed=False,
+    )
+    d = StructureBreakDetector(left_strength=1, right_strength=1)
+    assert d.detect_all_historical(candles, history_complete=True) == []
+    closed_only = [c for c in candles if c.is_closed]
+    assert d.detect_all_historical(closed_only, history_complete=True) == []
+
+
+def test_newly_eligible_level_already_beyond_without_crossing_no_break():
+    rows = [
+        (10.0, 10.5, 9.5, 10.0),
+        (10.0, 12.0, 9.8, 13.0),
+        (13.0, 13.5, 12.5, 13.2),
+        (13.2, 13.8, 13.0, 13.5),
+    ]
+    candles = _series_from_ohlc(rows)
+    d = StructureBreakDetector(left_strength=1, right_strength=1)
+    swings = SwingPivotDetector(left_strength=1, right_strength=1).detect_all_historical(candles)
+    sh = [o for o in swings if o.type == "swing_high"]
+    assert sh, "fixture must produce a swing high"
+    obs = d.detect_all_historical(candles, history_complete=True)
+    assert not any(o.direction == "bullish" for o in obs)
+
+
+def test_registry_integration_structure_break():
+    reg = build_default_registry()
+    assert reg.is_supported("structure_break")
+    assert reg.is_supported("bos")
+    assert reg.is_supported("choch")
+    det, info = reg.create_detector("structure_break")
+    assert isinstance(det, StructureBreakDetector)
+    assert info.min_history == 4
+    assert det.min_history == 4
+    assert det.detector_config_id == info.detector_config_id
+    det2, info2 = reg.create_detector(
+        "bos",
+        config={"left_strength": 2, "right_strength": 2, "tie_policy": "first"},
+    )
+    assert det2.left_strength == 2
+    assert info2.min_history == 6
+    assert info2.detector_config_id == deterministic_config_id(
+        {"left_strength": 2, "right_strength": 2, "tie_policy": "first"}
+    )
+    with pytest.raises(ValueError, match="unknown params"):
+        reg.validate_config("structure_break", {"left_strength": 1, "foo": 1})
+    with pytest.raises(ValueError):
+        reg.validate_config("structure_break", {"left_strength": 0})
+
+
+def test_timeframe_isolation():
+    c1m = _bullish_break_fixture()
+    rows = [
+        (10.0, 10.5, 9.5, 10.0),
+        (10.0, 12.0, 9.8, 11.0),
+        (11.0, 11.2, 10.0, 10.5),
+        (10.5, 10.8, 10.0, 10.2),
+        (10.2, 10.5, 10.0, 10.1),
+        (10.1, 13.5, 10.0, 13.0),
+    ]
+    c5m = _series_from_ohlc(rows, timeframe="5m", step=300)
+    d = StructureBreakDetector(left_strength=1, right_strength=1)
+    o1 = d.detect_all_historical(c1m, history_complete=True)
+    o5 = d.detect_all_historical(c5m, history_complete=True)
+    assert o1 and o5
+    assert all(o.timeframe == "1m" for o in o1)
+    assert all(o.timeframe == "5m" for o in o5)
+    assert {o.id for o in o1}.isdisjoint({o.id for o in o5})
+
+
+def test_detector_config_isolation_stable_ids():
+    candles = _bullish_break_fixture()
+    d1 = StructureBreakDetector(left_strength=1, right_strength=1, tie_policy="strict")
+    d2 = StructureBreakDetector(left_strength=2, right_strength=1, tie_policy="strict")
+    a = d1.detect_all_historical(candles, history_complete=True)
+    b = d2.detect_all_historical(candles, history_complete=True)
+    if a and b:
+        assert a[0].detector_config_id != b[0].detector_config_id
+        assert a[0].id != b[0].id
+    store = ObservationStore()
+    store.accept(a)
+    assert store.accept(a) == 0
+    assert store.accept(b) == len(b)
+
+
+def test_multiple_crossed_levels_at_most_one_each_deterministic_order():
+    rows = [
+        (10.0, 10.2, 9.5, 10.0),
+        (10.0, 11.0, 9.8, 10.5),
+        (10.5, 10.8, 10.0, 10.2),
+        (10.2, 10.5, 9.9, 10.0),
+        (10.0, 12.0, 9.8, 11.0),
+        (11.0, 11.2, 10.5, 10.8),
+        (10.8, 10.9, 10.4, 10.5),
+        (10.5, 13.5, 10.4, 13.0),
+        (13.0, 13.2, 12.5, 12.8),
+        (12.8, 14.0, 12.5, 13.5),
+    ]
+    candles = _series_from_ohlc(rows)
+    d = StructureBreakDetector(left_strength=1, right_strength=1)
+    obs = d.detect_all_historical(candles, history_complete=True)
+    bull = [o for o in obs if o.direction == "bullish"]
+    assert len(bull) == 2
+    assert [o.payload["broken_level_price"] for o in bull] == [11.0, 12.0]
+    assert len({o.reference_ids[0] for o in bull}) == 2
+
+
+def test_sequential_state_transitions_same_candle_order():
+    rows = [
+        (10.0, 10.2, 9.5, 10.0),
+        (10.0, 11.0, 9.8, 10.5),
+        (10.5, 10.8, 10.0, 10.2),
+        (10.2, 10.5, 9.9, 10.0),
+        (10.0, 12.0, 9.8, 11.0),
+        (11.0, 11.2, 10.5, 10.8),
+        (10.8, 10.9, 10.4, 10.5),
+        (10.5, 13.5, 10.4, 13.0),
+    ]
+    candles = _series_from_ohlc(rows)
+    d = StructureBreakDetector(left_strength=1, right_strength=1)
+    obs = d.detect_all_historical(candles, history_complete=True)
+    bull = [o for o in obs if o.confirmed_at == candles[7].epoch and o.direction == "bullish"]
+    assert len(bull) == 2
+    assert bull[0].payload["prior_structural_state"] == "neutral"
+    assert bull[0].payload["resulting_structural_state"] == "bullish"
+    assert bull[1].payload["prior_structural_state"] == "bullish"
+    assert bull[1].payload["resulting_structural_state"] == "bullish"
+    assert bull[0].variant == "bos"
+    assert bull[1].variant == "bos"
