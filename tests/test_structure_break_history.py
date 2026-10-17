@@ -106,18 +106,56 @@ def test_unconfirmed_swing_cannot_trigger_break():
 
 
 def test_newly_eligible_level_already_beyond_without_crossing_no_break():
-    rows = [
-        (10.0, 10.5, 9.5, 10.0),
-        (10.0, 12.0, 9.8, 13.0),
-        (13.0, 13.5, 12.5, 13.2),
-        (13.2, 13.8, 13.0, 13.5),
+    """
+    Under strict pivot geometry the confirmation window cannot close beyond the
+    swing high (right-side highs must be strictly below the candidate). The
+    reachable case of "level eligible while price is already beyond without a
+    qualifying continuous close cross" is therefore: SH confirms while price is
+    still on/at the level side, a discontinuous bar jumps beyond (evaluation
+    suppressed), then continuous bars remain beyond with no prev<=level &
+    cur>level pair.
+    """
+    start = 1_700_000_000
+    step = 60
+    # Continuous prefix: SH at 12.0 confirms on the third bar; closes stay <= 12.
+    prefix_rows = [
+        (10.0, 10.5, 9.5, 10.0),   # left
+        (10.0, 12.0, 9.8, 11.0),   # swing high = 12.0 (valid OHLC)
+        (11.0, 11.2, 10.0, 10.5),  # right / confirmation; close still below level
     ]
-    candles = _series_from_ohlc(rows)
-    d = StructureBreakDetector(left_strength=1, right_strength=1)
-    swings = SwingPivotDetector(left_strength=1, right_strength=1).detect_all_historical(candles)
+    candles = _series_from_ohlc(prefix_rows, start=start, step=step)
+
+    swings = SwingPivotDetector(left_strength=1, right_strength=1).detect_all_historical(
+        candles
+    )
     sh = [o for o in swings if o.type == "swing_high"]
     assert sh, "fixture must produce a swing high"
-    obs = d.detect_all_historical(candles, history_complete=True)
+    assert any(float(o.payload.get("price", 0.0)) == 12.0 for o in sh)
+
+    # Discontinuous jump beyond the level (gap suppresses break evaluation).
+    last = candles[-1].epoch
+    gapped = _c(last + 5 * step, 13.0, 14.0, 12.8, 13.5)
+    # Resume continuous series already beyond the level: prev.close > 12 always.
+    resume = [
+        _c(gapped.epoch + step, 13.5, 14.0, 13.0, 13.8),
+        _c(gapped.epoch + 2 * step, 13.8, 14.2, 13.5, 14.0),
+    ]
+    full = candles + [gapped] + resume
+
+    # All candles satisfy OHLC: low <= open/close <= high, low <= high.
+    for c in full:
+        assert c.low <= c.high
+        assert c.low <= c.open <= c.high
+        assert c.low <= c.close <= c.high
+
+    d = StructureBreakDetector(left_strength=1, right_strength=1)
+    obs = d.detect_all_historical(full, history_complete=True)
+    # No bullish structure break against the SH=12 level (no qualifying continuous cross).
+    assert not any(
+        o.direction == "bullish" and float(o.payload.get("broken_level_price", 0.0)) == 12.0
+        for o in obs
+    )
+    # Stronger: no bullish structure-break at all on this series.
     assert not any(o.direction == "bullish" for o in obs)
 
 
@@ -217,7 +255,11 @@ def test_sequential_state_transitions_same_candle_order():
     candles = _series_from_ohlc(rows)
     d = StructureBreakDetector(left_strength=1, right_strength=1)
     obs = d.detect_all_historical(candles, history_complete=True)
-    bull = [o for o in obs if o.confirmed_at == candles[7].epoch and o.direction == "bullish"]
+    bull = [
+        o
+        for o in obs
+        if o.confirmed_at == candles[7].epoch and o.direction == "bullish"
+    ]
     assert len(bull) == 2
     assert bull[0].payload["prior_structural_state"] == "neutral"
     assert bull[0].payload["resulting_structural_state"] == "bullish"
