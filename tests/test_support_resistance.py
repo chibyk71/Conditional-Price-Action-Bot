@@ -123,7 +123,8 @@ def test_zone_not_eligible_before_source_swing():
     candles = _series([10.0, 12.0, 11.0])
     zone = SupportResistanceZoneDetector().detect(candles)[0]
     assert not zone.is_eligible_at(candles[1].epoch)
-    assert zone.is_eligible_at(candles[2].epoch)
+    assert zone.is_eligible_at(candles[2].epoch
+    )
     assert zone.effective_confirmed_at() == candles[2].epoch
 
 
@@ -185,8 +186,13 @@ def test_invalid_strength_raises():
 def test_registry_construction_and_validation():
     reg = build_default_registry()
     assert reg.is_supported("support_resistance_zone")
-    assert reg.is_supported("support_zone")
-    assert reg.is_supported("resistance")
+    assert reg.is_supported("sr_zone")
+    # Polarized aliases intentionally omitted: detector always emits both variants;
+    # consumers filter by observation.variant (support | resistance).
+    assert not reg.is_supported("support")
+    assert not reg.is_supported("resistance")
+    assert not reg.is_supported("support_zone")
+    assert not reg.is_supported("resistance_zone")
     det, info = reg.create_detector("support_resistance_zone")
     assert isinstance(det, SupportResistanceZoneDetector)
     assert info.min_history == 3
@@ -195,7 +201,7 @@ def test_registry_construction_and_validation():
     assert det.detector_config_id == info.detector_config_id
 
     det2, info2 = reg.create_detector(
-        "support",
+        "sr_zone",
         config={"left_strength": 2, "right_strength": 1, "tie_policy": "first"},
     )
     assert det2.left_strength == 2

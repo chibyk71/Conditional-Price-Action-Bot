@@ -44,6 +44,19 @@ Same overridable parameters as `SwingPivotDetector`:
 
 `min_history = left + 1 + right`.
 
+## Registry concepts
+
+Capability names for this detector:
+
+- `support_resistance_zone` (canonical)
+- `sr_zone` (short alias)
+
+Both resolve to the same combined detector, which always emits both `support` and
+`resistance` variants when the corresponding swings confirm. Polarized names
+(`support`, `resistance`, `support_zone`, `resistance_zone`) are **not** registered,
+so capability lookup does not imply a single-variant filter. Consumers that need
+only one polarity must filter on `observation.variant`.
+
 ## Causal correctness
 
 Zones inherit timing from the source swing. A zone is never eligible before its
