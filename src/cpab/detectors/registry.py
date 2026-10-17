@@ -52,10 +52,17 @@ class CapabilityInfo:
     config: dict[str, Any] = field(default_factory=dict)
 
 
+# Factory may be zero-arg or accept a single config dict.
 DetectorFactory = Callable[..., PriceActionDetector]
 
 
 def _factory_accepts_config(factory: DetectorFactory) -> bool:
+    """
+    Inspect the factory signature to decide whether to pass effective config.
+
+    Avoids catching TypeError from inside the factory body, which would mask
+    real construction failures.
+    """
     try:
         sig = inspect.signature(factory)
     except (TypeError, ValueError):
@@ -129,6 +136,19 @@ class CapabilityRegistry:
             return False
 
     def validate_config(self, concept: str, config: dict[str, Any]) -> CapabilityInfo:
+        """
+        Validate user config against registered detectors for ``concept``.
+
+        Semantics:
+          - ``accepted_params`` (when set) is the whitelist of allowed keys.
+          - Keys present in the registered ``config`` are **fixed**: supplying a
+            different value raises ValueError (cannot override).
+          - Keys in ``accepted_params`` but not fixed in registered config may be
+            supplied by the caller and become part of the effective config.
+          - Swing / equal_levels / market_structure / structure_break apply
+            documented defaults for missing overridable keys (except equal_levels
+            tolerance, which is required).
+        """
         if concept not in self._concept_index:
             raise ValueError(f"Unsupported concept: {concept!r}")
         detector_ids = self._concept_index[concept]
