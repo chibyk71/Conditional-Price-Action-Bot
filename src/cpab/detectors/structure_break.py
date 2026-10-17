@@ -14,10 +14,12 @@ beyond the current close does not trigger a false break (requires a valid prior
 close that was on/at the level side).
 
 Structural state (independent per symbol / timeframe / effective config):
-  Initial: neutral
-  First confirmed break → BOS and establishes direction
-  Same-direction break → BOS
-  Opposite-direction break → CHoCH (and flips state)
+  Known-complete history (history_complete=True): start neutral; first break is BOS.
+  Incomplete / truncated history (history_complete=False, default): start unknown;
+  the first observed break still records the objective crossing and establishes
+  in-window direction, but prior_structural_state is "unknown" so callers do not
+  treat the label as absolute market-structure inception.
+  Same-direction break → BOS; opposite-direction break → CHoCH.
 
 Observation:
   type = "structure_break"
@@ -42,7 +44,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
 from cpab.detectors.base import PriceActionDetector
 from cpab.detectors.swing import (
@@ -57,6 +59,7 @@ from cpab.models import Candle, Observation
 logger = get_logger("cpab.detectors.structure_break")
 
 StructuralState = Literal["neutral", "bullish", "bearish"]
+PriorState = Union[StructuralState, Literal["unknown"]]
 
 
 def _stable_break_id(
@@ -98,6 +101,22 @@ class StructureBreakDetector(PriceActionDetector):
 
     Configuration is immutable after construction. Invalid swing parameters
     raise ValueError (no silent defaults or coercion for invalid values).
+
+    History completeness
+    --------------------
+    Reconstruction never invents structural events outside the supplied closed
+    series. Whether the *starting* structural state is known is controlled by
+    the keyword-only flag ``history_complete`` on detect / detect_all_historical:
+
+    * ``history_complete=True`` — caller asserts the series covers structural
+      history from a known neutral inception (or an equivalent full window).
+      Starting state is neutral; the first break is BOS under the locked table.
+    * ``history_complete=False`` (default) — starting state is **unknown**.
+      Objective crossings still emit, but ``prior_structural_state`` is
+      ``"unknown"`` until the first in-window break establishes direction.
+      Subsequent same/opposite transitions within the window follow the locked
+      table. Callers must not treat a first-break BOS label under unknown prior
+      as proof that no earlier structural break existed outside the window.
     """
 
     def __init__(
@@ -171,26 +190,44 @@ class StructureBreakDetector(PriceActionDetector):
             "tie_policy": self._tie_policy,
         }
 
-    def detect(self, candles: list[Candle]) -> list[Observation]:
+    def detect(
+        self,
+        candles: list[Candle],
+        *,
+        history_complete: bool = False,
+    ) -> list[Observation]:
         """
         Incremental path: reconstruct all breaks from closed history, then emit
         only those whose confirmed_at equals the latest closed bar's open epoch.
+
+        ``history_complete`` — see class docstring. Default False avoids treating
+        a truncated rolling window as structural inception.
         """
         closed = [c for c in candles if c.is_closed]
         if len(closed) < self.min_history:
             return []
-        all_obs = self._reconstruct(closed)
+        all_obs = self._reconstruct(closed, history_complete=history_complete)
         latest_epoch = closed[-1].epoch
         return [o for o in all_obs if o.confirmed_at == latest_epoch]
 
-    def detect_all_historical(self, candles: list[Candle]) -> list[Observation]:
+    def detect_all_historical(
+        self,
+        candles: list[Candle],
+        *,
+        history_complete: bool = False,
+    ) -> list[Observation]:
         """Full historical reconstruction for tests / offline backfill."""
         closed = [c for c in candles if c.is_closed]
         if len(closed) < self.min_history:
             return []
-        return self._reconstruct(closed)
+        return self._reconstruct(closed, history_complete=history_complete)
 
-    def _reconstruct(self, closed: list[Candle]) -> list[Observation]:
+    def _reconstruct(
+        self,
+        closed: list[Candle],
+        *,
+        history_complete: bool,
+    ) -> list[Observation]:
         if not closed:
             return []
         symbol = closed[-1].symbol
@@ -216,7 +253,8 @@ class StructureBreakDetector(PriceActionDetector):
         lows_sorted = sorted(lows, key=level_sort_key)
 
         broken: set[str] = set()
-        state: StructuralState = "neutral"
+        # Known-complete → neutral; truncated → unknown (do not invent inception).
+        state: Optional[StructuralState] = "neutral" if history_complete else None
         out: list[Observation] = []
 
         for i in range(1, len(closed)):
@@ -261,36 +299,42 @@ class StructureBreakDetector(PriceActionDetector):
                     bearish_swings.append((swing, level_price))
 
             for swing, level_price in bullish_swings:
-                variant, new_state = self._classify_and_transition(state, "bullish")
+                variant, new_state, prior_label = self._classify_and_transition(
+                    state, "bullish"
+                )
                 obs = self._make_observation(
                     direction="bullish",
                     swing=swing,
                     level_price=level_price,
                     candle=cur,
                     prev_close=prev.close,
-                    prior_state=state,
+                    prior_label=prior_label,
+                    variant=variant,
+                    resulting_state=new_state,
+                    history_complete=history_complete,
                     symbol=symbol,
                     timeframe=timeframe,
-                    force_variant=variant,
-                    force_resulting_state=new_state,
                 )
                 out.append(obs)
                 broken.add(swing.id)
                 state = new_state
 
             for swing, level_price in bearish_swings:
-                variant, new_state = self._classify_and_transition(state, "bearish")
+                variant, new_state, prior_label = self._classify_and_transition(
+                    state, "bearish"
+                )
                 obs = self._make_observation(
                     direction="bearish",
                     swing=swing,
                     level_price=level_price,
                     candle=cur,
                     prev_close=prev.close,
-                    prior_state=state,
+                    prior_label=prior_label,
+                    variant=variant,
+                    resulting_state=new_state,
+                    history_complete=history_complete,
                     symbol=symbol,
                     timeframe=timeframe,
-                    force_variant=variant,
-                    force_resulting_state=new_state,
                 )
                 out.append(obs)
                 broken.add(swing.id)
@@ -300,13 +344,23 @@ class StructureBreakDetector(PriceActionDetector):
 
     @staticmethod
     def _classify_and_transition(
-        prior: StructuralState, break_direction: str
-    ) -> tuple[str, StructuralState]:
+        prior: Optional[StructuralState], break_direction: str
+    ) -> tuple[str, StructuralState, PriorState]:
+        """
+        Map prior state + break direction → (variant, resulting state, prior label).
+
+        prior is None when history is incomplete and no in-window break has
+        established direction yet. The crossing still establishes direction;
+        prior_label is "unknown" and variant is "bos" as in-window direction
+        establishment (not a claim of absolute structural inception).
+        """
+        if prior is None:
+            return "bos", break_direction, "unknown"  # type: ignore[return-value]
         if prior == "neutral":
-            return "bos", break_direction  # type: ignore[return-value]
+            return "bos", break_direction, "neutral"  # type: ignore[return-value]
         if prior == break_direction:
-            return "bos", prior
-        return "choch", break_direction  # type: ignore[return-value]
+            return "bos", prior, prior
+        return "choch", break_direction, prior  # type: ignore[return-value]
 
     def _make_observation(
         self,
@@ -316,18 +370,13 @@ class StructureBreakDetector(PriceActionDetector):
         level_price: float,
         candle: Candle,
         prev_close: float,
-        prior_state: StructuralState,
+        prior_label: PriorState,
+        variant: str,
+        resulting_state: StructuralState,
+        history_complete: bool,
         symbol: str,
         timeframe: str,
-        force_variant: Optional[str] = None,
-        force_resulting_state: Optional[StructuralState] = None,
     ) -> Observation:
-        if force_variant is not None and force_resulting_state is not None:
-            variant = force_variant
-            resulting = force_resulting_state
-        else:
-            variant, resulting = self._classify_and_transition(prior_state, direction)
-
         event_time = candle.epoch
         confirmed_at = candle.epoch
         broken_swing_id = swing.id
@@ -343,8 +392,9 @@ class StructureBreakDetector(PriceActionDetector):
             "source_swing_confirmed_at": swing.confirmed_at,
             "previous_close": prev_close,
             "breakout_close": candle.close,
-            "prior_structural_state": prior_state,
-            "resulting_structural_state": resulting,
+            "prior_structural_state": prior_label,
+            "resulting_structural_state": resulting_state,
+            "history_complete": history_complete,
             "left_strength": self._left,
             "right_strength": self._right,
             "tie_policy": self._tie_policy,
