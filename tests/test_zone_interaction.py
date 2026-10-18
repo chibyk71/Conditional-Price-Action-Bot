@@ -598,3 +598,60 @@ def test_insufficient_history_no_emit():
     # min_history = 4; only 3 bars
     assert d.detect(candles) == []
     assert d.detect_all_historical(candles) == []
+
+
+def test_zone_level_price_rejects_missing_and_nonfinite():
+    """Malformed zone payloads must not fabricate interactions at price 0.0."""
+    from cpab.detectors.zone_interaction import _zone_level_price
+
+    def _zone(payload: dict) -> Observation:
+        return Observation.create(
+            type="support_resistance_zone",
+            symbol="R_100",
+            timeframe="1m",
+            candle_epoch=1_700_000_000,
+            confirmed_at=1_700_000_120,
+            variant="support",
+            detector_id="support_resistance_zone",
+            payload=payload,
+            id="synthetic-zone",
+        )
+
+    assert _zone_level_price(_zone({"source_price": 100.0})) == 100.0
+    assert _zone_level_price(_zone({"lower_bound": 99.5, "upper_bound": 99.5})) == 99.5
+    assert _zone_level_price(_zone({})) is None
+    assert _zone_level_price(_zone({"source_price": float("nan")})) is None
+    assert _zone_level_price(_zone({"source_price": float("inf")})) is None
+    assert _zone_level_price(_zone({"source_price": True})) is None
+    assert _zone_level_price(_zone({"source_price": "100"})) is None
+
+
+def test_malformed_zone_skipped_no_zero_price_interaction(monkeypatch):
+    """A zone missing level price is skipped; no touch/rejection/break at 0.0."""
+    candles = _support_zone_series([(100.5, 101.0, 99.5, 100.8)])
+    d = ZoneInteractionDetector()
+
+    real_zones = SupportResistanceZoneDetector().detect_all_historical(candles)
+    assert real_zones  # fixture produces a valid support zone
+
+    bad = Observation.create(
+        type="support_resistance_zone",
+        symbol=candles[0].symbol,
+        timeframe=candles[0].timeframe,
+        candle_epoch=candles[1].epoch,
+        confirmed_at=candles[2].epoch,
+        variant="support",
+        detector_id="support_resistance_zone",
+        payload={},  # no source_price / bounds
+        id="malformed-zone-no-price",
+    )
+
+    def _fake_detect_all(_candles):
+        return list(real_zones) + [bad]
+
+    monkeypatch.setattr(d._zones, "detect_all_historical", _fake_detect_all)
+    obs = d.detect_all_historical(candles)
+    # Valid zone still interacts; malformed zone produces nothing at price 0
+    assert any(o.reference_ids == (real_zones[0].id,) for o in obs)
+    assert not any(o.reference_ids == (bad.id,) for o in obs)
+    assert not any(o.payload.get("level_price") == 0.0 for o in obs)
