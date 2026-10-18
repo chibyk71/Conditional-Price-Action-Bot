@@ -13,6 +13,7 @@ from cpab.detectors.equal_levels import EqualLevelsDetector
 from cpab.detectors.market_structure import MarketStructureDetector
 from cpab.detectors.structure_break import StructureBreakDetector
 from cpab.detectors.support_resistance import SupportResistanceZoneDetector
+from cpab.detectors.zone_interaction import ZoneInteractionDetector
 
 __all__ = [
     "PriceActionDetector",
@@ -23,6 +24,7 @@ __all__ = [
     "MarketStructureDetector",
     "StructureBreakDetector",
     "SupportResistanceZoneDetector",
+    "ZoneInteractionDetector",
     "evaluate_raw",
     "AdapterOutcomeKind",
     "CapabilityRegistry",
