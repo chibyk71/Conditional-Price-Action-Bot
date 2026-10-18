@@ -388,18 +388,13 @@ def test_zone_and_break_causality():
 def test_multiple_source_zones_same_price_distinct_retests():
     """
     Two distinct support zones at the same level (from different swings)
-    can each break and retest independently with distinct identities.
+    each produce their own break and retest with distinct identities.
     """
     start = 1_700_000_000
     step = 60
-    # First swing low at 100 (bars 0-2), then price recovers and forms
-    # another swing low at 100 (bars 4-6), then breaks and retests.
-    # To keep it simple: use two separate series merged carefully is hard;
-    # instead verify that reference_ids include distinct zone+break pairs
-    # when the interaction detector produces multiple breaks at same price.
-    #
-    # Minimal: one zone, one break, one retest — already covered.
-    # Here: build two sequential swing lows at 100, break once after second.
+    # SL1 at 100 (bars 0-2), SL2 at 100 (bars 4-5), then one break candle
+    # closes below 100 and one post-break retest candle. Both zones share
+    # the level; both breaks can confirm on the same retest candle.
     bars = [
         (101.0, 102.0, 100.5, 101.0),  # 0
         (101.0, 101.5, 100.0, 100.5),  # 1 SL1=100
@@ -407,18 +402,45 @@ def test_multiple_source_zones_same_price_distinct_retests():
         (101.0, 102.0, 100.8, 101.5),  # 3
         (101.5, 102.0, 100.0, 100.8),  # 4 SL2=100
         (100.8, 101.2, 100.3, 100.9),  # 5 confirm SL2
-        (100.9, 101.0, 98.5, 99.0),    # 6 break (continuous from 5)
-        (99.0, 100.2, 98.5, 99.2),     # 7 retest
+        (100.9, 101.0, 98.5, 99.0),    # 6 break both supports (close < 100)
+        (99.0, 100.2, 98.5, 99.2),     # 7 retest contact + close < 100
     ]
     candles = _series(bars, start=start, step=step)
+
+    # Preconditions: two distinct support zones at 100, two breaks.
+    zones = SupportResistanceZoneDetector().detect_all_historical(candles)
+    supports = [
+        z for z in zones
+        if z.variant == "support" and z.payload.get("source_price") == 100.0
+    ]
+    assert len(supports) >= 2, f"expected >=2 support zones at 100, got {len(supports)}"
+    zone_ids = {z.id for z in supports}
+    assert len(zone_ids) >= 2
+
+    interactions = ZoneInteractionDetector().detect_all_historical(candles)
+    breaks = [o for o in interactions if o.variant == "break"]
+    breaks_at_100 = [
+        b for b in breaks
+        if b.reference_ids and b.reference_ids[0] in zone_ids
+    ]
+    assert len(breaks_at_100) >= 2, f"expected >=2 breaks of same-price zones, got {len(breaks_at_100)}"
+
     d = ZoneRetestDetector()
     all_obs = d.detect_all_historical(candles)
     retests = [o for o in all_obs if o.type == "zone_retest"]
-    # At least one retest; zones at same price remain distinguishable via IDs
-    assert len(retests) >= 1
+    assert len(retests) >= 2, f"expected >=2 distinct retests, got {len(retests)}"
+
+    retest_ids = {r.id for r in retests}
+    assert len(retest_ids) == len(retests)
+
+    source_zone_ids = {r.reference_ids[0] for r in retests}
+    break_ids = {r.reference_ids[1] for r in retests}
+    assert len(source_zone_ids) >= 2
+    assert len(break_ids) >= 2
     for r in retests:
         assert len(r.reference_ids) == 2
         assert r.payload["level_price"] == 100.0
+        assert r.direction == "bearish"
 
 
 # ===========================================================================
@@ -427,21 +449,46 @@ def test_multiple_source_zones_same_price_distinct_retests():
 
 
 def test_distinct_breaks_distinct_identities():
-    # Two sequential breaks of different zones (support then resistance path
-    # is complex). Use support break+retest, then a new structure.
-    # Simpler: verify that retest ID incorporates break_observation_id so
-    # changing the break changes the retest ID.
-    candles = _support_break_series([
-        (99.0, 100.2, 98.5, 99.2),
-    ])
+    """
+    Two sequential breaks (support then resistance) each produce a retest
+    whose identity incorporates that break; the retest IDs differ.
+    """
+    start = 1_700_000_000
+    step = 60
+    # Support path: SL at 100 → break → retest (bars 0-4)
+    # Then resistance path: SH at 110 → break → retest (bars 5-9)
+    bars = [
+        # Support zone + break + retest
+        (101.0, 102.0, 100.5, 101.0),  # 0
+        (101.0, 101.5, 100.0, 100.5),  # 1 SL=100
+        (100.5, 101.0, 100.2, 100.8),  # 2 confirm
+        (100.5, 100.8, 98.5, 99.0),    # 3 break support
+        (99.0, 100.2, 98.5, 99.2),     # 4 retest support (bearish)
+        # Climb and form resistance
+        (99.2, 108.5, 99.0, 108.0),    # 5
+        (108.0, 110.0, 107.5, 109.0),  # 6 SH=110
+        (109.0, 109.5, 108.5, 109.0),  # 7 confirm resistance
+        (109.5, 111.0, 109.0, 110.5),  # 8 break resistance
+        (110.5, 111.0, 109.8, 110.6),  # 9 retest resistance (bullish)
+    ]
+    candles = _series(bars, start=start, step=step)
     d = ZoneRetestDetector()
     all_obs = d.detect_all_historical(candles)
     retests = [o for o in all_obs if o.type == "zone_retest"]
-    assert len(retests) == 1
-    r = retests[0]
-    break_id = r.payload["break_observation_id"]
-    assert break_id in r.reference_ids
-    assert break_id in r.id
+    assert len(retests) >= 2, f"expected >=2 retests from distinct breaks, got {len(retests)}"
+
+    by_dir = {r.direction: r for r in retests}
+    assert "bearish" in by_dir
+    assert "bullish" in by_dir
+
+    bear = by_dir["bearish"]
+    bull = by_dir["bullish"]
+    assert bear.payload["break_observation_id"] != bull.payload["break_observation_id"]
+    assert bear.id != bull.id
+    assert bear.reference_ids[1] == bear.payload["break_observation_id"]
+    assert bull.reference_ids[1] == bull.payload["break_observation_id"]
+    assert bear.payload["break_observation_id"] in bear.id
+    assert bull.payload["break_observation_id"] in bull.id
 
 
 # ===========================================================================
@@ -629,8 +676,11 @@ def test_payload_and_reference_ids_contract():
     assert "source_zone_confirmed_at" in p
     assert "break_observation_id" in p
     assert "break_event_time" in p
-    assert p["open"] == 98.5 or True  # OHLC present
-    assert "high" in p and "low" in p and "close" in p
+    # Retest candle is the post-break bar: (99.0, 100.2, 98.5, 99.2)
+    assert p["open"] == 99.0
+    assert p["high"] == 100.2
+    assert p["low"] == 98.5
+    assert p["close"] == 99.2
     assert "previous_close" in p
     assert len(r.reference_ids) == 2
     assert r.reference_ids[0]  # zone id
