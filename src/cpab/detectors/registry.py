@@ -24,6 +24,9 @@ Phase 3B: zone_interaction accepts left_strength, right_strength, tie_policy
 
 Phase 3C: zone_retest accepts left_strength, right_strength, tie_policy
 (forwarded to internal SupportResistanceZoneDetector / ZoneInteractionDetector).
+
+Phase 3D: zone_polarity_flip accepts left_strength, right_strength, tie_policy
+(forwarded to internal ZoneInteractionDetector / SupportResistanceZoneDetector).
 """
 
 from __future__ import annotations
@@ -391,6 +394,32 @@ class CapabilityRegistry:
                 }
                 # zone_interaction min_history + 1 post-break candle
                 mh = left + 1 + right + 1 + 1
+            elif impl == "zone_polarity_flip":
+                from cpab.detectors.swing import _validate_strength, _validate_tie_policy
+
+                defaults = {
+                    "left_strength": 1,
+                    "right_strength": 1,
+                    "tie_policy": "strict",
+                }
+                merged = dict(defaults)
+                merged.update(effective)
+                if accepted is not None:
+                    for key, val in config.items():
+                        if key in accepted:
+                            merged[key] = val
+                left = _validate_strength("left_strength", merged.get("left_strength", 1))
+                right = _validate_strength(
+                    "right_strength", merged.get("right_strength", 1)
+                )
+                policy = _validate_tie_policy(merged.get("tie_policy", "strict"))
+                effective = {
+                    "left_strength": left,
+                    "right_strength": right,
+                    "tie_policy": policy,
+                }
+                # Same bound as zone_interaction (zone + prior/current pair).
+                mh = left + 1 + right + 1
             else:
                 mh = entry["min_history"]
                 if mh is None and entry.get("pattern"):
@@ -663,6 +692,29 @@ def build_default_registry() -> CapabilityRegistry:
         accepted_params=["left_strength", "right_strength", "tie_policy"],
         min_history=5,
         implementation="zone_retest",
+    )
+
+    def _zone_polarity_flip_factory(cfg: Optional[dict[str, Any]] = None) -> PriceActionDetector:
+        from cpab.detectors.zone_polarity_flip import ZonePolarityFlipDetector
+
+        c = dict(cfg or {})
+        return ZonePolarityFlipDetector(
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
+            detector_id="zone_polarity_flip",
+        )
+
+    reg.register(
+        "zone_polarity_flip",
+        concepts=[
+            "zone_polarity_flip",
+        ],
+        factory=_zone_polarity_flip_factory,
+        config={},
+        accepted_params=["left_strength", "right_strength", "tie_policy"],
+        min_history=4,
+        implementation="zone_polarity_flip",
     )
 
     return reg
