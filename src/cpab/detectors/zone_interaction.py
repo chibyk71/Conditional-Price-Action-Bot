@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any, Optional
 
 from cpab.detectors.base import PriceActionDetector
@@ -65,6 +66,31 @@ from cpab.logging_setup import get_logger
 from cpab.models import Candle, Observation
 
 logger = get_logger("cpab.detectors.zone_interaction")
+
+
+def _zone_level_price(zone: Observation) -> Optional[float]:
+    """
+    Extract a finite level price from a Phase 3A zone observation.
+
+    Prefer source_price, then lower_bound / upper_bound (zero-width zones have
+    equal bounds). Return None — and never fabricate 0.0 — when the payload is
+    missing or non-finite so malformed zones are skipped rather than evaluated
+    at a dummy price.
+    """
+    payload = zone.payload or {}
+    raw = payload.get("source_price")
+    if raw is None:
+        raw = payload.get("lower_bound")
+    if raw is None:
+        raw = payload.get("upper_bound")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    price = float(raw)
+    if not math.isfinite(price):
+        return None
+    return price
 
 
 def _stable_interaction_id(
@@ -244,12 +270,13 @@ class ZoneInteractionDetector(PriceActionDetector):
                     continuous = True
 
             for zone in eligible:
-                level_price = float(
-                    zone.payload.get(
-                        "source_price",
-                        zone.payload.get("lower_bound", zone.payload.get("upper_bound", 0.0)),
+                level_price = _zone_level_price(zone)
+                if level_price is None:
+                    logger.debug(
+                        "Skipping zone %s: missing or non-finite level price",
+                        zone.id,
                     )
-                )
+                    continue
                 zone_variant = zone.variant  # "support" | "resistance"
 
                 # --- Touch ---
