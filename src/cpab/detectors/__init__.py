@@ -14,6 +14,7 @@ from cpab.detectors.market_structure import MarketStructureDetector
 from cpab.detectors.structure_break import StructureBreakDetector
 from cpab.detectors.support_resistance import SupportResistanceZoneDetector
 from cpab.detectors.zone_interaction import ZoneInteractionDetector
+from cpab.detectors.zone_retest import ZoneRetestDetector
 
 __all__ = [
     "PriceActionDetector",
@@ -25,6 +26,7 @@ __all__ = [
     "StructureBreakDetector",
     "SupportResistanceZoneDetector",
     "ZoneInteractionDetector",
+    "ZoneRetestDetector",
     "evaluate_raw",
     "AdapterOutcomeKind",
     "CapabilityRegistry",
