@@ -27,6 +27,8 @@ Phase 3C: zone_retest accepts left_strength, right_strength, tie_policy
 
 Phase 3D: zone_polarity_flip accepts left_strength, right_strength, tie_policy
 (forwarded to internal ZoneInteractionDetector / SupportResistanceZoneDetector).
+
+Phase 4A: fair_value_gap — no configuration parameters (geometric formation only).
 """
 
 from __future__ import annotations
@@ -420,6 +422,10 @@ class CapabilityRegistry:
                 }
                 # Same bound as zone_interaction (zone + prior/current pair).
                 mh = left + 1 + right + 1
+            elif impl == "fair_value_gap":
+                # Phase 4A: no configuration; geometric three-candle formation only.
+                effective = {}
+                mh = 3
             else:
                 mh = entry["min_history"]
                 if mh is None and entry.get("pattern"):
@@ -715,6 +721,25 @@ def build_default_registry() -> CapabilityRegistry:
         accepted_params=["left_strength", "right_strength", "tie_policy"],
         min_history=4,
         implementation="zone_polarity_flip",
+    )
+
+    def _fair_value_gap_factory(cfg: Optional[dict[str, Any]] = None) -> PriceActionDetector:
+        from cpab.detectors.fair_value_gap import FairValueGapDetector
+
+        # Phase 4A: no accepted configuration parameters.
+        return FairValueGapDetector(detector_id="fair_value_gap")
+
+    reg.register(
+        "fair_value_gap",
+        concepts=[
+            "fair_value_gap",
+            "fvg",
+        ],
+        factory=_fair_value_gap_factory,
+        config={},
+        accepted_params=[],
+        min_history=3,
+        implementation="fair_value_gap",
     )
 
     return reg
