@@ -389,8 +389,9 @@ def test_registry_breaker_block_capability():
     assert reg.is_supported("breaker")
     info = reg.validate_config("breaker_block", {})
     assert info.detector_id == "breaker_block"
-    det = reg.create("breaker_block", {})
+    det, info_c = reg.create_detector("breaker_block")
     assert isinstance(det, BreakerBlockDetector)
+    assert info_c.detector_id == "breaker_block"
 
 
 def test_registry_rejects_unknown_param():
@@ -401,6 +402,6 @@ def test_registry_rejects_unknown_param():
             pytest.skip("talib not installed")
         raise
     with pytest.raises(ValueError):
-        reg.create("breaker_block", {"retest_required": True})
+        reg.create_detector("breaker_block", config={"retest_required": True})
     with pytest.raises(ValueError):
-        reg.create("breaker_block", {"min_body_ratio": 2.0})
+        reg.create_detector("breaker_block", config={"min_body_ratio": 2.0})

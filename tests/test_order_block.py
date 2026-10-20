@@ -418,9 +418,10 @@ def test_registry_order_block_capability():
     assert info.detector_id == "order_block"
     assert info.min_history >= 4
     # Default min_body_ratio applied via factory
-    det = reg.create("order_block", {})
+    det, info_c = reg.create_detector("order_block")
     assert isinstance(det, OrderBlockDetector)
     assert det.config_dict()["min_body_ratio"] == DEFAULT_MIN_BODY_RATIO
+    assert info_c.detector_id == "order_block"
 
 
 def test_registry_rejects_invalid_min_body_ratio():
@@ -431,9 +432,9 @@ def test_registry_rejects_invalid_min_body_ratio():
             pytest.skip("talib not installed")
         raise
     with pytest.raises(ValueError):
-        reg.create("order_block", {"min_body_ratio": 2.0})
+        reg.create_detector("order_block", config={"min_body_ratio": 2.0})
     with pytest.raises(ValueError):
-        reg.create("order_block", {"min_body_ratio": -1})
+        reg.create_detector("order_block", config={"min_body_ratio": -1})
 
 
 def test_detector_config_id_deterministic():
