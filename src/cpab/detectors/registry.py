@@ -39,6 +39,10 @@ tie_policy forwarded to StructureBreakDetector; composes confirmed BOS only.
 
 Phase 4E: breaker_block — same OB config forwarded; composes confirmed Order
 Blocks; emits on strict close-through of the OB zone (no retest/BOS required).
+
+Phase 4F: mitigation_block — same OB/breaker config forwarded; tracks progressive
+wick-based touch / partial_fill / full_fill against confirmed Order Blocks and
+Breaker Blocks. Does not mutate sources.
 """
 
 from __future__ import annotations
@@ -858,6 +862,38 @@ def build_default_registry() -> CapabilityRegistry:
         ],
         min_history=5,
         implementation="breaker_block",
+    )
+
+    def _mitigation_block_factory(
+        cfg: Optional[dict[str, Any]] = None,
+    ) -> PriceActionDetector:
+        from cpab.detectors.mitigation_block import MitigationBlockDetector
+
+        c = dict(cfg or {})
+        return MitigationBlockDetector(
+            min_body_ratio=c.get("min_body_ratio", 0.5),
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
+            detector_id="mitigation_block",
+        )
+
+    reg.register(
+        "mitigation_block",
+        concepts=[
+            "mitigation_block",
+            "mitigation",
+        ],
+        factory=_mitigation_block_factory,
+        config={},
+        accepted_params=[
+            "min_body_ratio",
+            "left_strength",
+            "right_strength",
+            "tie_policy",
+        ],
+        min_history=6,
+        implementation="mitigation_block",
     )
 
     return reg
