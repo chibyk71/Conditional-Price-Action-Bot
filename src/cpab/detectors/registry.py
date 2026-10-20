@@ -31,6 +31,8 @@ Phase 3D: zone_polarity_flip accepts left_strength, right_strength, tie_policy
 Phase 4A: fair_value_gap — no configuration parameters (geometric formation only).
 
 Phase 4B: fair_value_gap_lifecycle — no configuration parameters; composes Phase 4A FVG.
+
+Phase 4C: inverse_fair_value_gap — no configuration; composes Phase 4B invalidations.
 """
 
 from __future__ import annotations
@@ -432,6 +434,10 @@ class CapabilityRegistry:
                 # Phase 4B: no configuration; composition of Phase 4A + post-formation bars.
                 effective = {}
                 mh = 4
+            elif impl == "inverse_fair_value_gap":
+                # Phase 4C: no configuration; maps Phase 4B invalidations to IFVG.
+                effective = {}
+                mh = 4
             else:
                 mh = entry["min_history"]
                 if mh is None and entry.get("pattern"):
@@ -766,6 +772,26 @@ def build_default_registry() -> CapabilityRegistry:
         accepted_params=[],
         min_history=4,
         implementation="fair_value_gap_lifecycle",
+    )
+
+    def _inverse_fair_value_gap_factory(
+        cfg: Optional[dict[str, Any]] = None,
+    ) -> PriceActionDetector:
+        from cpab.detectors.inverse_fair_value_gap import InverseFairValueGapDetector
+
+        return InverseFairValueGapDetector(detector_id="inverse_fair_value_gap")
+
+    reg.register(
+        "inverse_fair_value_gap",
+        concepts=[
+            "inverse_fair_value_gap",
+            "ifvg",
+        ],
+        factory=_inverse_fair_value_gap_factory,
+        config={},
+        accepted_params=[],
+        min_history=4,
+        implementation="inverse_fair_value_gap",
     )
 
     return reg
