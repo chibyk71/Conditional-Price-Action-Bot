@@ -294,6 +294,7 @@ def test_no_events_after_full_fill():
 
 def test_independent_lifecycle_per_source():
     """OB mitigation and breaker mitigation track independent state."""
+    # Form bullish OB, then close-through → breaker, then mitigate the breaker.
     rows = _bullish_ob_base_rows() + [
         (13.0, 13.2, 9.0, 9.5),   # idx 6: close < L → breaker (bearish)
         (9.5, 10.5, 9.0, 10.0),  # idx 7: approach breaker from below → touch/partial
@@ -302,12 +303,15 @@ def test_independent_lifecycle_per_source():
     det = MitigationBlockDetector()
     obs = det.detect_all_historical(candles)
 
+    # OB source may also have been mitigated by the close-through candle
+    # (low=9.0 <= L → full_fill of bullish OB).
     by_source: dict[str, list[str]] = {}
     for o in obs:
         sid = o.payload["source_id"]
         by_source.setdefault(sid, []).append(o.variant)
 
     assert len(by_source) >= 1
+    # At least one source should have progressed; OB full-fill on idx 6 is expected.
     ob_full = any(
         stages == ["touch", "partial_fill", "full_fill"]
         or "full_fill" in stages
@@ -328,6 +332,7 @@ def test_deterministic_identity_idempotent():
     b = det.detect_all_historical(candles)
     assert [o.id for o in a] == [o.id for o in b]
     assert len(a) >= 2
+    # Distinct stages have distinct ids
     assert len({o.id for o in a}) == len(a)
 
 
@@ -356,6 +361,7 @@ def test_confirmed_order_block_accepted():
     det = MitigationBlockDetector()
     obs = det.detect_all_historical(candles)
     assert any(o.payload["source_type"] == "order_block" for o in obs)
+    # Source OB itself unchanged
     ob_det = OrderBlockDetector()
     obs_ob = ob_det.detect_all_historical(candles)
     assert len(obs_ob) == 1
@@ -407,7 +413,9 @@ def test_source_confirmation_precedes_interaction():
     rows = _bullish_ob_base_rows()  # ends at OB confirm
     candles = _series_from_ohlc(rows)
     det = MitigationBlockDetector()
+    # min_history may block; even if not, no interaction after confirm
     obs = det.detect_all_historical(candles) if len(candles) >= det.min_history else []
+    # OB confirmed at last candle — no later interaction candle
     assert all(
         o.confirmed_at > candles[5].epoch
         for o in obs
@@ -421,7 +429,9 @@ def test_forming_candles_ignored():
     ]
     candles = _series_from_ohlc(rows, last_closed=False)
     det = MitigationBlockDetector()
+    # Last candle forming — incremental detect should ignore it
     latest = det.detect(candles)
+    # closed series ends at OB confirm; no mitigation on forming bar
     assert latest == []
 
 
@@ -431,12 +441,13 @@ def test_discontinuity_skips_without_inference():
         (13.0, 13.5, 10.5, 12.0),
     ]
     candles = _series_from_ohlc(rows)
+    # Introduce a discontinuity by rewriting last epoch far ahead
     bad = list(candles)
     last = bad[-1]
     bad[-1] = Candle(
         symbol=last.symbol,
         timeframe=last.timeframe,
-        epoch=last.epoch + 10 * STEP,
+        epoch=last.epoch + 10 * STEP,  # gap
         open=last.open,
         high=last.high,
         low=last.low,
@@ -445,15 +456,17 @@ def test_discontinuity_skips_without_inference():
     )
     det = MitigationBlockDetector()
     obs = det.detect_all_historical(bad)
+    # Discontinuous candle must not produce mitigation
     assert all(o.confirmed_at != bad[-1].epoch for o in obs)
 
 
 def test_discontinuity_at_first_interaction():
     """Gap at the first post-confirmation candle suppresses that interaction."""
     rows = _bullish_ob_base_rows() + [
-        (13.0, 13.5, 10.5, 12.0),
+        (13.0, 13.5, 10.5, 12.0),  # would be touch+partial if continuous
     ]
     candles = _series_from_ohlc(rows)
+    # Gap between OB confirm (idx 5) and interaction (idx 6)
     bad = list(candles)
     last = bad[-1]
     bad[-1] = Candle(
@@ -483,6 +496,7 @@ def test_discontinuity_after_touch_before_partial():
         (12.0, 12.5, 10.0, 11.5),  # idx 8: continuous with idx 7 after rewrite
     ]
     candles = _series_from_ohlc(rows)
+    # Make idx 7 discontinuous from idx 6 (gap), but idx 8 continuous with idx 7
     c7 = candles[7]
     gap_epoch = candles[6].epoch + 5 * STEP
     candles[7] = Candle(
@@ -499,7 +513,7 @@ def test_discontinuity_after_touch_before_partial():
     candles[8] = Candle(
         symbol=c8.symbol,
         timeframe=c8.timeframe,
-        epoch=gap_epoch + STEP,
+        epoch=gap_epoch + STEP,  # continuous with rewritten idx 7
         open=c8.open,
         high=c8.high,
         low=c8.low,
@@ -509,8 +523,11 @@ def test_discontinuity_after_touch_before_partial():
     det = MitigationBlockDetector()
     obs = det.detect_all_historical(candles)
     stages = [o.variant for o in obs]
+    # Touch from continuous idx 6 must remain
     assert "touch" in stages
+    # Gap candle (idx 7) must not emit
     assert all(o.confirmed_at != gap_epoch for o in obs)
+    # Later continuous candle may emit partial on its own wick (low=10.0 interior)
     assert "partial_fill" in stages
     partials = [o for o in obs if o.variant == "partial_fill"]
     assert all(o.confirmed_at == gap_epoch + STEP for o in partials)
@@ -552,7 +569,9 @@ def test_later_candle_after_gap_may_reach_full_independently():
     )
     det = MitigationBlockDetector()
     obs = det.detect_all_historical(candles)
+    # Suppressed gap candle emits nothing
     assert all(o.confirmed_at != gap_epoch for o in obs)
+    # Continuous later candle with low < L emits all three stages
     stages = [o.variant for o in obs]
     assert stages == ["touch", "partial_fill", "full_fill"]
     assert all(o.confirmed_at == gap_epoch + STEP for o in obs)
@@ -571,6 +590,7 @@ def test_identity_distinguishes_stages_same_source():
     assert len(set(ids)) == 3
     variants = {o.variant for o in obs}
     assert variants == {"touch", "partial_fill", "full_fill"}
+    # Each id embeds the variant string
     for o in obs:
         assert o.variant in o.id
 
