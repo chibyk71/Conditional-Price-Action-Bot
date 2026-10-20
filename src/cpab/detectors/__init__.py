@@ -19,6 +19,7 @@ from cpab.detectors.zone_polarity_flip import ZonePolarityFlipDetector
 from cpab.detectors.fair_value_gap import FairValueGapDetector
 from cpab.detectors.fair_value_gap_lifecycle import FairValueGapLifecycleDetector
 from cpab.detectors.inverse_fair_value_gap import InverseFairValueGapDetector
+from cpab.detectors.order_block import OrderBlockDetector
 
 __all__ = [
     "PriceActionDetector",
@@ -35,6 +36,7 @@ __all__ = [
     "FairValueGapDetector",
     "FairValueGapLifecycleDetector",
     "InverseFairValueGapDetector",
+    "OrderBlockDetector",
     "evaluate_raw",
     "AdapterOutcomeKind",
     "CapabilityRegistry",
