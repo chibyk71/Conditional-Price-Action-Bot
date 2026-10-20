@@ -36,6 +36,9 @@ Phase 4C: inverse_fair_value_gap — no configuration; composes Phase 4B invalid
 
 Phase 4D: order_block — min_body_ratio (default 0.5) plus left/right_strength,
 tie_policy forwarded to StructureBreakDetector; composes confirmed BOS only.
+
+Phase 4E: breaker_block — same OB config forwarded; composes confirmed Order
+Blocks; emits on strict close-through of the OB zone (no retest/BOS required).
 """
 
 from __future__ import annotations
@@ -825,6 +828,36 @@ def build_default_registry() -> CapabilityRegistry:
         ],
         min_history=4,
         implementation="order_block",
+    )
+
+    def _breaker_block_factory(cfg: Optional[dict[str, Any]] = None) -> PriceActionDetector:
+        from cpab.detectors.breaker_block import BreakerBlockDetector
+
+        c = dict(cfg or {})
+        return BreakerBlockDetector(
+            min_body_ratio=c.get("min_body_ratio", 0.5),
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
+            detector_id="breaker_block",
+        )
+
+    reg.register(
+        "breaker_block",
+        concepts=[
+            "breaker_block",
+            "breaker",
+        ],
+        factory=_breaker_block_factory,
+        config={},
+        accepted_params=[
+            "min_body_ratio",
+            "left_strength",
+            "right_strength",
+            "tie_policy",
+        ],
+        min_history=5,
+        implementation="breaker_block",
     )
 
     return reg
