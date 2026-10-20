@@ -33,6 +33,9 @@ Phase 4A: fair_value_gap — no configuration parameters (geometric formation on
 Phase 4B: fair_value_gap_lifecycle — no configuration parameters; composes Phase 4A FVG.
 
 Phase 4C: inverse_fair_value_gap — no configuration; composes Phase 4B invalidations.
+
+Phase 4D: order_block — min_body_ratio (default 0.5) plus left/right_strength,
+tie_policy forwarded to StructureBreakDetector; composes confirmed BOS only.
 """
 
 from __future__ import annotations
@@ -792,6 +795,36 @@ def build_default_registry() -> CapabilityRegistry:
         accepted_params=[],
         min_history=4,
         implementation="inverse_fair_value_gap",
+    )
+
+    def _order_block_factory(cfg: Optional[dict[str, Any]] = None) -> PriceActionDetector:
+        from cpab.detectors.order_block import OrderBlockDetector
+
+        c = dict(cfg or {})
+        return OrderBlockDetector(
+            min_body_ratio=c.get("min_body_ratio", 0.5),
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
+            detector_id="order_block",
+        )
+
+    reg.register(
+        "order_block",
+        concepts=[
+            "order_block",
+            "ob",
+        ],
+        factory=_order_block_factory,
+        config={},
+        accepted_params=[
+            "min_body_ratio",
+            "left_strength",
+            "right_strength",
+            "tie_policy",
+        ],
+        min_history=4,
+        implementation="order_block",
     )
 
     return reg
