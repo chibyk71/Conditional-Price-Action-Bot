@@ -20,6 +20,7 @@ from cpab.detectors.fair_value_gap import FairValueGapDetector
 from cpab.detectors.fair_value_gap_lifecycle import FairValueGapLifecycleDetector
 from cpab.detectors.inverse_fair_value_gap import InverseFairValueGapDetector
 from cpab.detectors.order_block import OrderBlockDetector
+from cpab.detectors.breaker_block import BreakerBlockDetector
 
 __all__ = [
     "PriceActionDetector",
@@ -37,6 +38,7 @@ __all__ = [
     "FairValueGapLifecycleDetector",
     "InverseFairValueGapDetector",
     "OrderBlockDetector",
+    "BreakerBlockDetector",
     "evaluate_raw",
     "AdapterOutcomeKind",
     "CapabilityRegistry",
