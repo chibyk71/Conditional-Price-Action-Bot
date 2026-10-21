@@ -24,7 +24,7 @@ Variant is always `swing_based_v1`.
 ## Causality
 
 - Uses only confirmed swing observations (never before `confirmed_at`).
-- Breakout eligible only after all anchors are available (`candle.epoch ≥ max(anchor.confirmed_at)`).
+- Breakout eligible only on a subsequent completed candle after all anchors are available (`candle.epoch > max(anchor.confirmed_at)`). Equality with the latest anchor availability timestamp does not confirm.
 - Window measured in candles from the final anchor’s candle; max `max_bars_to_breakout` (default 50).
 - No retrospective confirmation; no gap bridging; exact timeframe continuity required.
 - Deduplication by identical anchor swing observation IDs.
