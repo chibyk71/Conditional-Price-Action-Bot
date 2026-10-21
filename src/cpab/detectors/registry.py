@@ -43,6 +43,11 @@ Blocks; emits on strict close-through of the OB zone (no retest/BOS required).
 Phase 4F: mitigation_block — same OB/breaker config forwarded; tracks progressive
 wick-based touch / partial_fill / full_fill against confirmed Order Blocks and
 Breaker Blocks. Does not mutate sources.
+
+Phase 5A: classical_reversal — similarity_tolerance (default 0.002),
+max_bars_to_breakout (default 50), plus left/right_strength and tie_policy
+forwarded to SwingPivotDetector. Emits double_top, double_bottom,
+head_and_shoulders, inverse_head_and_shoulders.
 """
 
 from __future__ import annotations
@@ -448,6 +453,48 @@ class CapabilityRegistry:
                 # Phase 4C: no configuration; maps Phase 4B invalidations to IFVG.
                 effective = {}
                 mh = 4
+            elif impl == "classical_reversal":
+                from cpab.detectors.swing import _validate_strength, _validate_tie_policy
+                from cpab.detectors.classical_reversal import (
+                    _validate_similarity_tolerance,
+                    _validate_max_bars_to_breakout,
+                    DEFAULT_SIMILARITY_TOLERANCE,
+                    DEFAULT_MAX_BARS_TO_BREAKOUT,
+                )
+
+                defaults = {
+                    "similarity_tolerance": DEFAULT_SIMILARITY_TOLERANCE,
+                    "max_bars_to_breakout": DEFAULT_MAX_BARS_TO_BREAKOUT,
+                    "left_strength": 1,
+                    "right_strength": 1,
+                    "tie_policy": "strict",
+                }
+                merged = dict(defaults)
+                merged.update(effective)
+                if accepted is not None:
+                    for key, val in config.items():
+                        if key in accepted:
+                            merged[key] = val
+                tol = _validate_similarity_tolerance(
+                    merged.get("similarity_tolerance", DEFAULT_SIMILARITY_TOLERANCE)
+                )
+                max_bars = _validate_max_bars_to_breakout(
+                    merged.get("max_bars_to_breakout", DEFAULT_MAX_BARS_TO_BREAKOUT)
+                )
+                left = _validate_strength("left_strength", merged.get("left_strength", 1))
+                right = _validate_strength(
+                    "right_strength", merged.get("right_strength", 1)
+                )
+                policy = _validate_tie_policy(merged.get("tie_policy", "strict"))
+                effective = {
+                    "similarity_tolerance": tol,
+                    "max_bars_to_breakout": max_bars,
+                    "left_strength": left,
+                    "right_strength": right,
+                    "tie_policy": policy,
+                }
+                s = left + 1 + right
+                mh = 5 * s + 1
             else:
                 mh = entry["min_history"]
                 if mh is None and entry.get("pattern"):
@@ -894,6 +941,43 @@ def build_default_registry() -> CapabilityRegistry:
         ],
         min_history=6,
         implementation="mitigation_block",
+    )
+
+    def _classical_reversal_factory(
+        cfg: Optional[dict[str, Any]] = None,
+    ) -> PriceActionDetector:
+        from cpab.detectors.classical_reversal import ClassicalReversalDetector
+
+        c = dict(cfg or {})
+        return ClassicalReversalDetector(
+            similarity_tolerance=c.get("similarity_tolerance", 0.002),
+            max_bars_to_breakout=c.get("max_bars_to_breakout", 50),
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
+            detector_id="classical_reversal",
+        )
+
+    reg.register(
+        "classical_reversal",
+        concepts=[
+            "double_top",
+            "double_bottom",
+            "head_and_shoulders",
+            "inverse_head_and_shoulders",
+            "classical_reversal",
+        ],
+        factory=_classical_reversal_factory,
+        config={},
+        accepted_params=[
+            "similarity_tolerance",
+            "max_bars_to_breakout",
+            "left_strength",
+            "right_strength",
+            "tie_policy",
+        ],
+        min_history=16,
+        implementation="classical_reversal",
     )
 
     return reg
