@@ -447,27 +447,88 @@ class TestCausalityAndExpiry:
         assert len(tops) == 0
 
     def test_gap_blocks_cross_gap_pattern(self):
-        """A gap between anchors must prevent the pattern from confirming."""
-        candles = _double_top_series()
-        # Insert a discontinuity between B (idx 5) and C (idx 8) by shifting
-        # all bars from index 6 onward by 10 timeframe steps.
-        shift = 10 * TF
-        for i in range(6, len(candles)):
-            c = candles[i]
-            candles[i] = Candle(
-                symbol=c.symbol,
-                timeframe=c.timeframe,
-                epoch=c.epoch + shift,
-                open=c.open,
-                high=c.high,
-                low=c.low,
-                close=c.close,
-                is_closed=True,
-                source=c.source,
-            )
+        """
+        Cross-gap anchors must not form a pattern even when *both* continuous
+        segments independently satisfy min_history.
+
+        Layout (L=R=1, min_history=10):
+          Segment 1 (12 bars): padding + SH A + SL B + padding
+          GAP
+          Segment 2 (14 bars): padding + SH C + padding + breakout close
+        If the detector bridged the gap, A/B/C + breakout would confirm a DT.
+        Segment processing must prevent that; emptiness must not be due to
+        either segment being shorter than min_history.
+        """
         det = ClassicalReversalDetector(max_bars_to_breakout=20)
-        tops = [o for o in det.detect_all_historical(candles) if o.type == CONCEPT_DOUBLE_TOP]
+        assert det.min_history == 10
+
+        peak_a, trough_b, peak_c = 110.0, 100.0, 110.1
+        mid_h = min(peak_a, peak_c) - 4.0
+        mid_l = trough_b + 4.0
+        start = START
+
+        def bar(i: int, o: float, h: float, l: float, cl: float) -> Candle:
+            return _c(i, o, h, l, cl, start=start)
+
+        # --- Segment 1: indices 0..11 (12 bars) ---
+        seg1: list[Candle] = []
+        for i in range(12):
+            seg1.append(bar(i, 105, mid_h, mid_l, 105))
+        # Plant A at 3, B at 7 (room for L/R=1 neighbors inside the segment)
+        seg1[2] = bar(2, 105, mid_h, mid_l, 105)
+        seg1[3] = bar(3, 105, peak_a, mid_l, 105)  # A
+        seg1[4] = bar(4, 105, mid_h, mid_l, 105)
+        seg1[6] = bar(6, 105, mid_h, mid_l, 105)
+        seg1[7] = bar(7, 105, mid_h, trough_b, 105)  # B
+        seg1[8] = bar(8, 105, mid_h, mid_l, 105)
+
+        # --- Gap: skip 15 TF steps between last seg1 and first seg2 ---
+        gap_bars = 15
+        seg2_start_i = 12 + gap_bars  # epoch index after gap
+
+        # --- Segment 2: 14 bars starting after the gap ---
+        seg2: list[Candle] = []
+        for j in range(14):
+            idx = seg2_start_i + j
+            seg2.append(bar(idx, 105, mid_h, mid_l, 105))
+        # Plant C at local 3 (global seg2_start_i+3), breakout at local 10
+        c_local = 3
+        bo_local = 10
+        seg2[c_local - 1] = bar(seg2_start_i + c_local - 1, 105, mid_h, mid_l, 105)
+        seg2[c_local] = bar(seg2_start_i + c_local, 105, peak_c, mid_l, 105)  # C
+        seg2[c_local + 1] = bar(seg2_start_i + c_local + 1, 105, mid_h, mid_l, 105)
+        seg2[bo_local] = bar(
+            seg2_start_i + bo_local,
+            trough_b + 1,
+            trough_b + 2,
+            98,
+            99,  # close below neckline
+        )
+
+        candles = seg1 + seg2
+        assert len(seg1) >= det.min_history
+        assert len(seg2) >= det.min_history
+        # Confirm a genuine discontinuity between segments
+        assert seg2[0].epoch - seg1[-1].epoch != TF
+
+        tops = [
+            o
+            for o in det.detect_all_historical(candles)
+            if o.type == CONCEPT_DOUBLE_TOP
+        ]
         assert len(tops) == 0
+
+        # Sanity: the same geometry without a gap *does* confirm (cross-check
+        # that emptiness is not because the planted pivots/breakout are invalid).
+        continuous = _double_top_series(
+            peak_a=peak_a, trough_b=trough_b, peak_c=peak_c, breakout_close=99.0
+        )
+        tops_ok = [
+            o
+            for o in det.detect_all_historical(continuous)
+            if o.type == CONCEPT_DOUBLE_TOP
+        ]
+        assert len(tops_ok) >= 1
 
     def test_gap_does_not_hide_pattern_in_continuous_segment(self):
         """
