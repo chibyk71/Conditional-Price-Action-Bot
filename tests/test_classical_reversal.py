@@ -375,6 +375,63 @@ class TestInverseHeadAndShoulders:
 
 
 class TestCausalityAndExpiry:
+    def test_breakout_on_all_confirmed_at_epoch_does_not_confirm(self):
+        """
+        Negative case: the only deep close is on the bar whose epoch equals
+        the last anchor's confirmed_at. Pattern must not emit.
+        """
+        mid_h, mid_l, trough_b = 106.0, 104.0, 100.0
+        candles = [
+            _c(0, 105, mid_h, mid_l, 105),
+            _c(1, 105, mid_h, mid_l, 105),
+            _c(2, 105, 110.0, mid_l, 105),   # A
+            _c(3, 105, mid_h, mid_l, 105),
+            _c(4, 105, mid_h, mid_l, 105),
+            _c(5, 105, mid_h, trough_b, 105),  # B
+            _c(6, 105, mid_h, mid_l, 105),
+            _c(7, 105, mid_h, mid_l, 105),
+            _c(8, 105, 110.1, mid_l, 105),   # C pivot
+            _c(9, 101, 102, 98, 99),          # == C.confirmed_at, close below neckline
+            _c(10, 105, mid_h, mid_l, 105),  # after availability but close ABOVE neckline
+            _c(11, 105, mid_h, mid_l, 105),
+            _c(12, 105, mid_h, mid_l, 105),
+        ]
+        det = ClassicalReversalDetector(max_bars_to_breakout=20)
+        tops = [o for o in det.detect_all_historical(candles) if o.type == CONCEPT_DOUBLE_TOP]
+        assert len(tops) == 0
+
+    def test_breakout_not_on_same_bar_as_last_anchor_confirm(self):
+
+        """
+        Contract: breakout must be strictly after all anchors are available.
+        With L=R=1, final swing C at idx 8 confirms at idx 9 (epoch of bar 9).
+        A close below neckline on bar 9 must NOT confirm; bar 10+ may.
+        """
+        # Build series where bar 9 closes below neckline but equals C.confirmed_at
+        mid_h, mid_l, trough_b = 106.0, 104.0, 100.0
+        candles = [
+            _c(0, 105, mid_h, mid_l, 105),
+            _c(1, 105, mid_h, mid_l, 105),
+            _c(2, 105, 110.0, mid_l, 105),   # A
+            _c(3, 105, mid_h, mid_l, 105),
+            _c(4, 105, mid_h, mid_l, 105),
+            _c(5, 105, mid_h, trough_b, 105),  # B
+            _c(6, 105, mid_h, mid_l, 105),
+            _c(7, 105, mid_h, mid_l, 105),
+            _c(8, 105, 110.1, mid_l, 105),   # C pivot
+            _c(9, 101, 102, 98, 99),          # C confirm bar AND deep close — must NOT confirm
+            _c(10, 105, mid_h, mid_l, 105),
+            _c(11, 101, 102, 98, 99),         # first eligible after all available
+            _c(12, 105, mid_h, mid_l, 105),
+        ]
+        det = ClassicalReversalDetector(max_bars_to_breakout=20)
+        tops = [o for o in det.detect_all_historical(candles) if o.type == CONCEPT_DOUBLE_TOP]
+        assert len(tops) >= 1
+        # Must confirm on bar 11, not bar 9
+        assert tops[0].confirmed_at == candles[11].epoch
+        assert tops[0].confirmed_at != candles[9].epoch
+
+
     def test_confirmation_timing(self):
         candles = _double_top_series()
         det = ClassicalReversalDetector(max_bars_to_breakout=20)

@@ -352,7 +352,11 @@ class ClassicalReversalDetector(PriceActionDetector):
         """
         Eligible breakout candidates: completed candles strictly after the
         final anchor's candle, within max_bars, and only after all anchors
-        are available (candle.epoch >= all_confirmed_at).
+        are available (candle.epoch > all_confirmed_at).
+
+        Contract: confirmation requires a *subsequent* completed candle after
+        every anchor is confirmed/available. Equality with the latest
+        anchor's confirmed_at is not eligible.
         """
         if final_anchor_event not in epoch_to_idx:
             return []
@@ -363,8 +367,8 @@ class ClassicalReversalDetector(PriceActionDetector):
             if idx >= len(closed):
                 break
             c = closed[idx]
-            # Must not confirm before all anchors available.
-            if c.epoch < all_confirmed_at:
+            # Must be strictly after all anchors are available.
+            if c.epoch <= all_confirmed_at:
                 continue
             eligible.append((offset, c))
         return eligible
@@ -454,7 +458,7 @@ class ClassicalReversalDetector(PriceActionDetector):
                     # Reject if window already expired at availability.
                     # Window starts at final_idx+1; if all_conf is after the
                     # last possible breakout candle epoch, expired.
-                    if all_conf > last_eligible_epoch:
+                    if all_conf >= last_eligible_epoch:
                         continue
 
                     eligible = self._candle_after_all_available(
@@ -569,7 +573,7 @@ class ClassicalReversalDetector(PriceActionDetector):
                         last_eligible_epoch = closed[last_eligible_idx].epoch
                     else:
                         last_eligible_epoch = closed[-1].epoch if closed else all_conf
-                    if all_conf > last_eligible_epoch:
+                    if all_conf >= last_eligible_epoch:
                         continue
 
                     eligible = self._candle_after_all_available(
@@ -718,7 +722,7 @@ class ClassicalReversalDetector(PriceActionDetector):
                                 last_eligible_epoch = (
                                     closed[-1].epoch if closed else all_conf
                                 )
-                            if all_conf > last_eligible_epoch:
+                            if all_conf >= last_eligible_epoch:
                                 continue
 
                             eligible = self._candle_after_all_available(
@@ -878,7 +882,7 @@ class ClassicalReversalDetector(PriceActionDetector):
                                 last_eligible_epoch = (
                                     closed[-1].epoch if closed else all_conf
                                 )
-                            if all_conf > last_eligible_epoch:
+                            if all_conf >= last_eligible_epoch:
                                 continue
 
                             eligible = self._candle_after_all_available(
