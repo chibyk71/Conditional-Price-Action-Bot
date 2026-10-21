@@ -279,17 +279,38 @@ class ClassicalReversalDetector(PriceActionDetector):
         if step is None or step <= 0:
             return []
 
-        # Exact continuity of the full series used as evidence.
-        if not self._series_consecutive(closed, step=step):
-            return []
+        # Process each continuous segment independently so a gap does not
+        # suppress valid patterns wholly within an unbroken section. Patterns
+        # still cannot bridge gaps: anchors and breakout must live in one segment.
+        out: list[Observation] = []
+        for segment in self._continuous_segments(closed, step=step):
+            if len(segment) < self.min_history:
+                continue
+            out.extend(self._reconstruct_segment(segment, step=step))
 
+        out.sort(
+            key=lambda o: (
+                o.confirmed_at or 0,
+                o.event_time or 0,
+                o.type,
+                o.id,
+            )
+        )
+        return out
+
+    def _reconstruct_segment(
+        self,
+        closed: list[Candle],
+        *,
+        step: int,
+    ) -> list[Observation]:
+        """Detect patterns within one continuous closed-candle segment."""
         epoch_to_idx = {c.epoch: i for i, c in enumerate(closed)}
 
         swing_obs = self._swing.detect_all_historical(closed)
         highs = [o for o in swing_obs if o.type == "swing_high"]
         lows = [o for o in swing_obs if o.type == "swing_low"]
 
-        # Sort by event_time then confirmed_at then id for determinism.
         def _key(o: Observation) -> tuple:
             return (o.event_time or o.candle_epoch, o.confirmed_at or 0, o.id)
 
@@ -319,17 +340,24 @@ class ClassicalReversalDetector(PriceActionDetector):
                 highs, lows, closed, epoch_to_idx, step, seen_anchor_keys
             )
         )
-
-        # Deterministic order: by confirmed_at, event_time, type, id
-        out.sort(
-            key=lambda o: (
-                o.confirmed_at or 0,
-                o.event_time or 0,
-                o.type,
-                o.id,
-            )
-        )
         return out
+
+    @staticmethod
+    def _continuous_segments(
+        candles: list[Candle],
+        *,
+        step: int,
+    ) -> list[list[Candle]]:
+        """Split into maximal runs of exact timeframe spacing."""
+        if not candles:
+            return []
+        segments: list[list[Candle]] = [[candles[0]]]
+        for i in range(1, len(candles)):
+            if candles[i].epoch - candles[i - 1].epoch == step:
+                segments[-1].append(candles[i])
+            else:
+                segments.append([candles[i]])
+        return segments
 
     @staticmethod
     def _series_consecutive(candles: list[Candle], *, step: int) -> bool:

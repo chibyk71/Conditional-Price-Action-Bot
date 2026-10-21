@@ -446,22 +446,56 @@ class TestCausalityAndExpiry:
         tops = [o for o in det.detect_all_historical(candles) if o.type == CONCEPT_DOUBLE_TOP]
         assert len(tops) == 0
 
-    def test_gap_rejects_series(self):
+    def test_gap_blocks_cross_gap_pattern(self):
+        """A gap between anchors must prevent the pattern from confirming."""
         candles = _double_top_series()
-        c = candles[6]
-        candles[6] = Candle(
-            symbol=c.symbol,
-            timeframe=c.timeframe,
-            epoch=c.epoch + 5 * TF,
-            open=c.open,
-            high=c.high,
-            low=c.low,
-            close=c.close,
-            is_closed=True,
-            source=c.source,
-        )
+        # Insert a discontinuity between B (idx 5) and C (idx 8) by shifting
+        # all bars from index 6 onward by 10 timeframe steps.
+        shift = 10 * TF
+        for i in range(6, len(candles)):
+            c = candles[i]
+            candles[i] = Candle(
+                symbol=c.symbol,
+                timeframe=c.timeframe,
+                epoch=c.epoch + shift,
+                open=c.open,
+                high=c.high,
+                low=c.low,
+                close=c.close,
+                is_closed=True,
+                source=c.source,
+            )
         det = ClassicalReversalDetector(max_bars_to_breakout=20)
-        assert det.detect_all_historical(candles) == []
+        tops = [o for o in det.detect_all_historical(candles) if o.type == CONCEPT_DOUBLE_TOP]
+        assert len(tops) == 0
+
+    def test_gap_does_not_hide_pattern_in_continuous_segment(self):
+        """
+        A gap after a complete continuous pattern must not suppress that pattern.
+        Build a valid DT series, then append a gapped trailing section.
+        """
+        first = _double_top_series()
+        # Trailing continuous block after a large gap (unrelated noise).
+        gap_start = first[-1].epoch + 50 * TF
+        mid_h, mid_l = 106.0, 104.0
+        trailing = []
+        for i in range(8):
+            trailing.append(
+                _c(
+                    i,
+                    105,
+                    mid_h,
+                    mid_l,
+                    105,
+                    start=gap_start,
+                )
+            )
+        candles = first + trailing
+        det = ClassicalReversalDetector(max_bars_to_breakout=20)
+        tops = [o for o in det.detect_all_historical(candles) if o.type == CONCEPT_DOUBLE_TOP]
+        assert len(tops) >= 1
+        # Confirmed on the original breakout bar (still within the first segment).
+        assert tops[0].confirmed_at == first[11].epoch
 
     def test_incremental_matches_historical_on_latest(self):
         candles = _double_top_series()

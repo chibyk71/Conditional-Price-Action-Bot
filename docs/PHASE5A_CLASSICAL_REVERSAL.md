@@ -26,7 +26,8 @@ Variant is always `swing_based_v1`.
 - Uses only confirmed swing observations (never before `confirmed_at`).
 - Breakout eligible only on a subsequent completed candle after all anchors are available (`candle.epoch > max(anchor.confirmed_at)`). Equality with the latest anchor availability timestamp does not confirm.
 - Window measured in candles from the final anchor’s candle; max `max_bars_to_breakout` (default 50).
-- No retrospective confirmation; no gap bridging; exact timeframe continuity required.
+- No retrospective confirmation; no gap bridging across a pattern’s evidence path.
+- Continuous segments are processed independently: a gap does not suppress valid patterns wholly within an unbroken section; exact timeframe continuity is required within each segment.
 - Deduplication by identical anchor swing observation IDs.
 
 ## Configuration
