@@ -759,6 +759,71 @@ class TestEnumerationSemantics:
             in2 = refs & s2
             assert not (in1 and in2), "candidate spanned the data gap"
 
+
+    def test_coverage_matches_known_counts(self):
+        """Deterministic candidate counts for perfect alternation (no wall-clock).
+
+        These counts document exponential growth and lock coverage against
+        accidental narrowing. Values measured from the contract-compliant
+        subsequence enumerator at commit 8517257 / streaming optimization.
+        """
+        from cpab.models import Observation
+
+        def mk(i, typ, price):
+            ep = START + i * TF
+            return Observation.create(
+                type=typ, symbol="R_100", timeframe="1m", candle_epoch=ep,
+                id=f"{typ}|c|{i}", event_time=ep, confirmed_at=ep + TF,
+                detector_id="swing_pivot", detector_config_id="cfg:t",
+                payload={"price": price}, metadata={"price": price},
+            )
+
+        d = RectangleDetector()
+        # n alternating swings starting with high; expected candidate counts
+        expected = {8: 43, 10: 156, 12: 490, 14: 1420}
+        for n, exp in expected.items():
+            highs, lows = [], []
+            for i in range(n):
+                if i % 2 == 0:
+                    highs.append(mk(i, "swing_high", 110.0))
+                else:
+                    lows.append(mk(i, "swing_low", 100.0))
+            cands = d._enumerate_candidates(highs, lows)
+            assert len(cands) == exp, f"n={n}: got {len(cands)}, expected {exp}"
+            # every candidate alternates and has ≥2 of each
+            for c in cands:
+                types = [a.type for a in c]
+                assert all(a != b for a, b in zip(types, types[1:]))
+                assert sum(1 for t in types if t == "swing_high") >= 2
+                assert sum(1 for t in types if t == "swing_low") >= 2
+
+    def test_stream_and_list_enumeration_agree(self):
+        """Streaming iterator and list materialization yield identical sets."""
+        from cpab.models import Observation
+
+        def mk(i, typ, price):
+            ep = START + i * TF
+            return Observation.create(
+                type=typ, symbol="R_100", timeframe="1m", candle_epoch=ep,
+                id=f"{typ}|s|{i}", event_time=ep, confirmed_at=ep + TF,
+                detector_id="swing_pivot", detector_config_id="cfg:t",
+                payload={"price": price}, metadata={"price": price},
+            )
+
+        highs, lows = [], []
+        for i in range(12):
+            if i % 2 == 0:
+                highs.append(mk(i, "swing_high", 110.0))
+            else:
+                lows.append(mk(i, "swing_low", 100.0))
+        d = RectangleDetector()
+        as_list = d._enumerate_candidates(highs, lows)
+        as_stream = list(d._iter_candidates(highs, lows))
+        keys_l = sorted(tuple(sorted(a.id for a in c)) for c in as_list)
+        keys_s = sorted(tuple(sorted(a.id for a in c)) for c in as_stream)
+        assert keys_l == keys_s
+
+
 class TestRegistry:
     def _require_talib(self):
         pytest.importorskip("talib")
