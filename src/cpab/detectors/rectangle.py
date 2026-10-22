@@ -28,6 +28,10 @@ Causality and expiry (aligned with Phase 5A):
     offsets 1 .. max_bars_to_breakout inclusive.
   - Continuous segments processed independently; no gap bridging.
   - At most one confirmation per anchor-ID combination (first qualifying direction).
+  - Candidate enumeration: contiguous alternating windows within maximal alternating
+    runs of the chronological swing stream (O(n²)); operational bounds
+    _MAX_SWINGS_FOR_ENUMERATION and _MAX_ANCHORS_PER_CANDIDATE prevent pathological
+    work on extremely long histories.
 
 Configuration (all participate in detector_config_id):
   - boundary_tolerance: relative (default 0.002)
@@ -359,14 +363,37 @@ class RectangleDetector(PriceActionDetector):
 
         return out
 
+    # Operational safety bound: number of swings considered for enumeration
+    # within one continuous segment. Prevents pathological exponential work
+    # on extremely long histories while covering realistic range structures.
+    # Most-recent swings are retained when the bound is exceeded.
+    _MAX_SWINGS_FOR_ENUMERATION = 32
+
+    # Maximum anchors per single candidate window (contiguous alternating run).
+    # Longer runs are split into overlapping windows of this length or less.
+    _MAX_ANCHORS_PER_CANDIDATE = 12
+
     def _enumerate_candidates(
         self,
         highs: list[Observation],
         lows: list[Observation],
     ) -> list[list[Observation]]:
         """
-        Enumerate all alternating subsequences with ≥2 highs and ≥2 lows.
-        Each candidate is a list of Observations in chronological order.
+        Enumerate rectangle candidates from the chronological swing stream.
+
+        Strategy (bounded, O(n²) in the number of swings):
+          1. Merge and sort highs/lows by event time.
+          2. If more than _MAX_SWINGS_FOR_ENUMERATION, keep the most recent.
+          3. Split into maximal *contiguous alternating runs* (a run breaks when
+             two consecutive swings share the same type).
+          4. Within each run of length >= 4, emit every contiguous window
+             (subarray) of length 4 .. min(run_len, _MAX_ANCHORS_PER_CANDIDATE)
+             that contains at least 2 highs and 2 lows.
+
+        Contiguous windows preserve alternation by construction and match the
+        natural definition of successive range touches. This replaces the prior
+        exhaustive alternating-subsequence search, which could grow exponentially
+        with swing count while producing many non-structural combinations.
         """
         all_swings: list[tuple[Observation, str]] = []
         for o in highs:
@@ -392,25 +419,37 @@ class RectangleDetector(PriceActionDetector):
             )
         )
 
+        if len(all_swings) > self._MAX_SWINGS_FOR_ENUMERATION:
+            all_swings = all_swings[-self._MAX_SWINGS_FOR_ENUMERATION :]
+
+        # Split into maximal contiguous alternating runs.
+        runs: list[list[tuple[Observation, str]]] = []
+        if all_swings:
+            current: list[tuple[Observation, str]] = [all_swings[0]]
+            for item in all_swings[1:]:
+                if item[1] == current[-1][1]:
+                    # same type as previous → break run
+                    if len(current) >= 4:
+                        runs.append(current)
+                    current = [item]
+                else:
+                    current.append(item)
+            if len(current) >= 4:
+                runs.append(current)
+
         candidates: list[list[Observation]] = []
+        max_len = self._MAX_ANCHORS_PER_CANDIDATE
+        for run in runs:
+            n = len(run)
+            # Contiguous windows [i, j) of length >= 4
+            for i in range(n):
+                for j in range(i + 4, min(n, i + max_len) + 1):
+                    window = run[i:j]
+                    nh = sum(1 for _, t in window if t == "H")
+                    nl = len(window) - nh
+                    if nh >= 2 and nl >= 2:
+                        candidates.append([o for o, _ in window])
 
-        def rec(start: int, path: list[Observation], path_types: list[str]) -> None:
-            if len(path) >= 4:
-                nh = sum(1 for t in path_types if t == "H")
-                nl = len(path) - nh
-                if nh >= 2 and nl >= 2:
-                    candidates.append(list(path))
-            for i in range(start, len(all_swings)):
-                o, typ = all_swings[i]
-                if path_types and typ == path_types[-1]:
-                    continue  # must alternate
-                path.append(o)
-                path_types.append(typ)
-                rec(i + 1, path, path_types)
-                path.pop()
-                path_types.pop()
-
-        rec(0, [], [])
         return candidates
 
     def _try_confirm_candidate(

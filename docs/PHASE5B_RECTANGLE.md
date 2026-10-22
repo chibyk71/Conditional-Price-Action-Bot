@@ -41,6 +41,11 @@ Variant is always `swing_based_v1`.
   chronological order preserved in the payload). Overlapping candidates with distinct anchors
   may coexist.
 - At most one confirmation per anchor combination (first qualifying breakout direction).
+- **Candidate formation**: contiguous alternating windows inside maximal alternating runs of
+  the chronological swing stream (not exhaustive subsequences). Operational bounds:
+  at most 32 most-recent swings per segment for enumeration, and at most 12 anchors per
+  candidate window. This keeps work O(n²) and avoids exponential blow-up on long histories
+  while preserving min-touch, alternation, tolerance, and causality contracts.
 
 ## Configuration
 

@@ -223,10 +223,55 @@ class TestStructureAndBoundaries:
         assert [o for o in obs if o.type == CONCEPT_RECTANGLE] == []
 
     def test_non_alternating_rejected(self):
-        # Two highs in a row without intervening low that participates —
-        # enumeration only emits alternating sequences, so pure non-alternating
-        # sets are never formed. Covered implicitly by structure tests.
-        pass
+        """Every emitted candidate must strictly alternate H/L in chronological order.
+
+        Construct a series with two consecutive swing highs (no intervening low
+        in the pivot stream between them). Enumeration must never emit a
+        non-alternating anchor list; any rectangle must still alternate.
+        """
+        from cpab.detectors.rectangle import RectangleDetector
+        from cpab.detectors.swing import SwingPivotDetector
+
+        mid = 105.0
+        candles = []
+        for i in range(20):
+            if i == 1:
+                candles.append(_c(i, 108, 110.0, 107, 109))   # SH
+            elif i == 3:
+                candles.append(_c(i, 102, 103, 100.0, 101))   # SL
+            elif i == 5:
+                candles.append(_c(i, 108, 110.0, 107, 109))   # SH
+            elif i == 7:
+                # second high without a new low between 5 and 7 in a way that
+                # creates consecutive same-type if intermediate is not a pivot;
+                # quiet bars in between keep pivots at 1,3,5,7 as H L H H? 
+                # With strength 1, bar 7 high needs neighbors lower.
+                candles.append(_c(i, 108, 110.5, 107, 109))   # SH again
+            elif i == 9:
+                candles.append(_c(i, 102, 103, 100.0, 101))   # SL
+            elif i == 11:
+                candles.append(_c(i, 109, 112, 108.5, 111.0))  # breakout
+            else:
+                candles.append(_c(i, mid, mid + 0.3, mid - 0.3, mid))
+
+        d = RectangleDetector(boundary_tolerance=0.01, max_bars_to_breakout=10)
+        obs = d.detect_all_historical(candles)
+        rects = [o for o in obs if o.type == CONCEPT_RECTANGLE]
+        for o in rects:
+            types = o.payload["anchor_swing_types"]
+            assert len(types) >= 4
+            for a, b in zip(types, types[1:]):
+                assert a != b, f"non-alternating anchors in {types}"
+
+        # Unit-level: enumeration itself never yields non-alternating paths
+        sw = SwingPivotDetector(left_strength=1, right_strength=1, tie_policy="strict")
+        sobs = sw.detect_all_historical(candles)
+        highs = [o for o in sobs if o.type == "swing_high"]
+        lows = [o for o in sobs if o.type == "swing_low"]
+        for anchors in d._enumerate_candidates(highs, lows):
+            types = [a.type for a in anchors]
+            for a, b in zip(types, types[1:]):
+                assert a != b, f"enumerate produced non-alternating {types}"
 
     def test_anchor_outside_tolerance_rejected(self):
         support, resistance = 100.0, 110.0
@@ -490,6 +535,72 @@ class TestDataIntegrity:
         hist_ids = {o.id for o in hist}
         for o in inc:
             assert o.id in hist_ids
+
+
+
+class TestEnumerationBounds:
+    def test_contiguous_windows_only_alternating(self):
+        """Enumerate never returns a non-alternating window."""
+        mid = 105.0
+        candles = []
+        for i in range(24):
+            if i % 4 == 1:
+                candles.append(_c(i, 108, 110.0 + (i % 3) * 0.05, 107, 109))
+            elif i % 4 == 3:
+                candles.append(_c(i, 102, 103, 100.0 - (i % 3) * 0.05, 101))
+            else:
+                candles.append(_c(i, mid, mid + 0.3, mid - 0.3, mid))
+        d = RectangleDetector(boundary_tolerance=0.02, max_bars_to_breakout=10)
+        from cpab.detectors.swing import SwingPivotDetector
+        sw = SwingPivotDetector()
+        sobs = sw.detect_all_historical(candles)
+        highs = [o for o in sobs if o.type == "swing_high"]
+        lows = [o for o in sobs if o.type == "swing_low"]
+        cands = d._enumerate_candidates(highs, lows)
+        assert len(cands) >= 1
+        for anchors in cands:
+            types = [a.type for a in anchors]
+            assert len(anchors) >= 4
+            assert len(anchors) <= d._MAX_ANCHORS_PER_CANDIDATE
+            for a, b in zip(types, types[1:]):
+                assert a != b
+            nh = sum(1 for t in types if t == "swing_high")
+            nl = len(types) - nh
+            assert nh >= 2 and nl >= 2
+
+    def test_enumeration_scales_quadratically_not_exponentially(self):
+        """Candidate count grows polynomially with swing count, not 2^n.
+
+        Build a long perfectly alternating pivot stream and assert the number
+        of candidates stays within the O(n²) contiguous-window bound.
+        """
+        mid = 105.0
+        n_bars = 80
+        candles = []
+        for i in range(n_bars):
+            if i % 4 == 1:
+                candles.append(_c(i, 108, 110.0, 107, 109))
+            elif i % 4 == 3:
+                candles.append(_c(i, 102, 103, 100.0, 101))
+            else:
+                candles.append(_c(i, mid, mid + 0.3, mid - 0.3, mid))
+        d = RectangleDetector(boundary_tolerance=0.02, max_bars_to_breakout=5)
+        from cpab.detectors.swing import SwingPivotDetector
+        sw = SwingPivotDetector()
+        sobs = sw.detect_all_historical(candles)
+        highs = [o for o in sobs if o.type == "swing_high"]
+        lows = [o for o in sobs if o.type == "swing_low"]
+        n_swings = len(highs) + len(lows)
+        cands = d._enumerate_candidates(highs, lows)
+        # Contiguous windows of length 4..min(n, MAX) over a run of length n
+        # yield at most n * MAX windows; with the swing cap, hard upper bound:
+        max_n = min(n_swings, d._MAX_SWINGS_FOR_ENUMERATION)
+        max_len = d._MAX_ANCHORS_PER_CANDIDATE
+        # loose upper bound: runs * windows_per_run < max_n * max_n
+        assert len(cands) <= max_n * max_n
+        # and far below exponential 2^n for n >= 16
+        if max_n >= 16:
+            assert len(cands) < 2 ** (max_n // 2)
 
 
 class TestRegistry:
