@@ -29,12 +29,15 @@ Causality and expiry (aligned with Phase 5A):
   - Continuous segments processed independently; no gap bridging.
   - At most one confirmation per anchor-ID combination (first qualifying direction).
   - Candidate enumeration: all alternating chronological *subsequences* with
-    ≥2 highs and ≥2 lows (intermediate swings may be skipped). Deduplicate only
-    identical anchor-ID sets. Safe suffix-count pruning avoids exploring branches
-    that cannot reach the minimum touch counts; no silent truncation of history
-    and no arbitrary anchor-count caps. Candidates are streamed into confirmation
-    (not retained as a full in-memory list). Worst-case combinatorial cost remains
-    exponential in the number of alternating swings in a continuous segment.
+    ≥2 highs and ≥2 lows (intermediate swings may be skipped). Safe suffix-count
+    pruning avoids exploring branches that cannot reach the minimum touch counts;
+    no silent truncation of history and no arbitrary anchor-count caps. Candidates
+    are streamed into confirmation. Source swing IDs are unique per entry (first
+    chronological occurrence kept if duplicates appear); index-based traversal of
+    strictly increasing paths therefore yields each anchor-ID combination at most
+    once without a global seen-set. Worst-case *runtime* remains exponential in the
+    number of alternating swings; peak *memory* is O(n swings + recursion depth +
+    confirmed outputs), not O(candidate count).
 
 Configuration (all participate in detector_config_id):
   - boundary_tolerance: relative (default 0.002)
@@ -381,42 +384,60 @@ class RectangleDetector(PriceActionDetector):
             truncated by a fixed swing-count cap.
           - No maximum anchor-count restriction on a candidate.
           - Alternation is required in chronological order.
-          - Identical anchor-ID sets are yielded at most once.
+          - Each distinct anchor-ID combination is yielded at most once.
+
+        Uniqueness (no global seen-set):
+          - Valid SwingPivotDetector output assigns a unique observation id per
+            swing. When building the entry list, if the same id appears more than
+            once the first chronological occurrence is kept.
+          - Recursion only appends strictly increasing indices (start = i+1).
+            Therefore each path is a unique ordered subset of entries, and with
+            unique entry ids each path maps to a unique ordered id sequence.
+          - A global set of sorted-id tuples is unnecessary under these guarantees
+            and would retain O(candidate-count) memory.
 
         Performance (semantics-preserving):
-          - Index-based recursion with parallel type/id arrays reduces per-step
-            allocation versus carrying Observation lists on the path.
+          - Index-based recursion with parallel type/id arrays.
           - Precomputed suffix H/L counts prune branches that cannot reach the
             minimum touch requirements — proven safe.
-          - Streaming yield avoids retaining the full candidate list in memory
-            during segment reconstruction.
-          - Worst-case number of candidates remains exponential in the number of
-            alternating swings; that is inherent to exhaustive subsequence
-            enumeration and is not reduced by narrowing coverage.
+          - Streaming yield avoids retaining the full candidate list.
+          - Peak memory is O(n + recursion depth + confirmed outputs).
+          - Worst-case *runtime* remains exponential in the number of alternating
+            swings; that cost is inherent to exhaustive subsequence enumeration.
         """
-        entries: list[tuple[Observation, str, str]] = []
+        raw: list[tuple[Observation, str, str]] = []
         for o in highs:
             et = _swing_event_time(o)
             if et is None or o.confirmed_at is None:
                 continue
             if _swing_price(o) is None:
                 continue
-            entries.append((o, "H", o.id))
+            raw.append((o, "H", o.id))
         for o in lows:
             et = _swing_event_time(o)
             if et is None or o.confirmed_at is None:
                 continue
             if _swing_price(o) is None:
                 continue
-            entries.append((o, "L", o.id))
+            raw.append((o, "L", o.id))
 
-        entries.sort(
+        raw.sort(
             key=lambda t: (
                 _swing_event_time(t[0]) or 0,
                 t[0].confirmed_at or 0,
                 t[2],
             )
         )
+
+        # Keep first chronological occurrence of each observation id so that
+        # strictly increasing index paths map 1:1 onto unique id combinations.
+        seen_ids: set[str] = set()
+        entries: list[tuple[Observation, str, str]] = []
+        for item in raw:
+            if item[2] in seen_ids:
+                continue
+            seen_ids.add(item[2])
+            entries.append(item)
 
         n = len(entries)
         if n < 4:
@@ -432,17 +453,13 @@ class RectangleDetector(PriceActionDetector):
             suffix_h[i] = suffix_h[i + 1] + (1 if types[i] == "H" else 0)
             suffix_l[i] = suffix_l[i + 1] + (1 if types[i] == "L" else 0)
 
-        seen: set[tuple[str, ...]] = set()
         path_idx: list[int] = []
 
         def rec(start: int, last_typ: str | None, nh: int, nl: int):
             if nh + suffix_h[start] < 2 or nl + suffix_l[start] < 2:
                 return
             if len(path_idx) >= 4 and nh >= 2 and nl >= 2:
-                key = tuple(sorted(ids[i] for i in path_idx))
-                if key not in seen:
-                    seen.add(key)
-                    yield [obs[i] for i in path_idx]
+                yield [obs[i] for i in path_idx]
             for i in range(start, n):
                 typ = types[i]
                 if last_typ is not None and typ == last_typ:

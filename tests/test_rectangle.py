@@ -824,6 +824,74 @@ class TestEnumerationSemantics:
         assert keys_l == keys_s
 
 
+
+    def test_unique_source_ids_yield_unique_combinations(self):
+        """With unique swing IDs, enumeration never emits duplicate ID sets.
+
+        Index-based strictly increasing paths map 1:1 onto unique ordered ID
+        sequences when every entry id is unique — no global seen-set required.
+        """
+        from cpab.models import Observation
+
+        def mk(i, typ, price):
+            ep = START + i * TF
+            return Observation.create(
+                type=typ, symbol="R_100", timeframe="1m", candle_epoch=ep,
+                id=f"{typ}|uniq|{i}", event_time=ep, confirmed_at=ep + TF,
+                detector_id="swing_pivot", detector_config_id="cfg:t",
+                payload={"price": price}, metadata={"price": price},
+            )
+
+        highs = [mk(i, "swing_high", 110.0) for i in range(0, 12, 2)]
+        lows = [mk(i, "swing_low", 100.0) for i in range(1, 12, 2)]
+        d = RectangleDetector()
+        cands = d._enumerate_candidates(highs, lows)
+        keys = [tuple(sorted(a.id for a in c)) for c in cands]
+        assert len(keys) == len(set(keys))
+        assert len(cands) == 490  # n=12 alternating lock
+
+    def test_duplicate_source_ids_collapsed_to_first_occurrence(self):
+        """Duplicate observation IDs keep the first chronological entry only.
+
+        Malformed or repeated upstream IDs must not multiply combinations or
+        require an O(candidates) seen-set. After entry-level dedup, traversal
+        uniqueness holds.
+        """
+        from cpab.models import Observation
+
+        def mk(i, typ, price, oid):
+            ep = START + i * TF
+            return Observation.create(
+                type=typ, symbol="R_100", timeframe="1m", candle_epoch=ep,
+                id=oid, event_time=ep, confirmed_at=ep + TF,
+                detector_id="swing_pivot", detector_config_id="cfg:t",
+                payload={"price": price}, metadata={"price": price},
+            )
+
+        # Two highs share the same id; first chronological occurrence is i=0
+        highs = [
+            mk(0, "swing_high", 110.0, "H_DUP"),
+            mk(2, "swing_high", 110.1, "H_DUP"),  # later duplicate — dropped
+            mk(4, "swing_high", 110.0, "H4"),
+            mk(6, "swing_high", 110.0, "H6"),
+        ]
+        lows = [
+            mk(1, "swing_low", 100.0, "L1"),
+            mk(3, "swing_low", 100.0, "L3"),
+            mk(5, "swing_low", 100.0, "L5"),
+        ]
+        d = RectangleDetector()
+        cands = d._enumerate_candidates(highs, lows)
+        keys = [tuple(sorted(a.id for a in c)) for c in cands]
+        assert len(keys) == len(set(keys)), "duplicate ID combinations emitted"
+        # No candidate may reference two distinct objects under H_DUP via later copy
+        for c in cands:
+            dup_objs = [a for a in c if a.id == "H_DUP"]
+            assert len(dup_objs) <= 1
+            if dup_objs:
+                assert dup_objs[0].event_time == START  # first occurrence only
+
+
 class TestRegistry:
     def _require_talib(self):
         pytest.importorskip("talib")

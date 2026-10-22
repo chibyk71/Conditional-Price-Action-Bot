@@ -45,12 +45,7 @@ Variant is always `swing_based_v1`.
   ≥2 lows. Intermediate swings may be skipped. History within a continuous segment is never
   truncated by a fixed swing-count cap; there is no maximum anchor-count restriction.
   Safe suffix-count pruning drops only branches that cannot reach the minimum touch counts.
-  Candidates are streamed into breakout confirmation (not retained as a full in-memory list).
-  Worst-case combinatorial cost is exponential in the number of alternating swings in a
-  continuous segment; that cost is inherent to exhaustive subsequence enumeration and is
-  not mitigated by silently narrowing valid coverage. Practical measurements: perfect
-  alternation of ~20 swings already yields tens of thousands of candidates; ~22 swings
-  approach 10⁵ candidates and multi-hundred-millisecond enumeration on typical hardware.
+  Candidates are streamed into breakout confirmation. Source swing IDs are unique per entry (first chronological occurrence if duplicates appear); strictly increasing index paths therefore yield each anchor-ID combination at most once without retaining a global set of candidate keys. Peak memory is O(n swings + recursion depth + confirmed outputs). Worst-case *runtime* remains exponential in the number of alternating swings — inherent to exhaustive subsequence enumeration. Practical measurements: perfect alternation of ~20 swings already yields tens of thousands of candidates; ~22 swings approach 10⁵ candidates and multi-hundred-millisecond enumeration on typical hardware.
 
 ## Configuration
 
