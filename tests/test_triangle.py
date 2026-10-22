@@ -442,64 +442,102 @@ class TestConvergenceAndBreakout:
             if o.type == CONCEPT_ASCENDING:
                 assert o.confirmed_at != candles[-1].epoch
 
-    def test_opposite_boundary_invalidates(self):
-        candles = _build_ascending(n_bars=32)
-        last_i = (candles[-1].epoch - START) // TF
-        for k in range(1, 3):
-            i = last_i + k
-            o, h, l, cl = _quiet(105.0)
-            candles.append(_c(i, o, h, l, cl, symbol="T_ASC"))
-        # close strictly below rising lower boundary (opposite) — invalidate
-        i = last_i + 3
-        candles.append(_c(i, 100.0, 101.0, 90.0, 91.0, symbol="T_ASC"))
-        # later would-be breakout above
-        for k in range(4, 7):
-            i = last_i + k
-            o, h, l, cl = _quiet(105.0)
-            candles.append(_c(i, o, h, l, cl, symbol="T_ASC"))
-        i = last_i + 7
-        candles.append(_c(i, 110.0, 113.0, 109.0, 112.0, symbol="T_ASC"))
-        d = TriangleDetector()
-        obs = d.detect_all_historical(candles)
-        # After invalidation, no ascending confirmation on this geometry
-        # (may still get other overlapping candidates that never saw the invalidate)
-        # At minimum: the late breakout bar should not be the only confirmation source
-        # for a candidate that was invalidated. Hard to assert globally; check that
-        # any ascending obs has confirmed_at before the invalidate bar OR is a
-        # different anchor set. Simpler: just ensure detector doesn't crash and
-        # returns a list.
-        assert isinstance(obs, list)
+    def _minimal_ascending_series(
+        self,
+        *,
+        breakout_offset: int,
+        invalidate_at_offset: int | None = None,
+        fill_close: float = 107.0,
+        max_bars: int = 50,
+    ) -> list[Candle]:
+        """
+        Controlled 2H+2L ascending geometry with shallow rising lower so the
+        apex is far beyond offset 50. Final swing event is at index 7.
+        Breakout is placed at index 7 + breakout_offset.
+        Optional opposite-boundary invalidation close at 7 + invalidate_at_offset.
+        """
+        hi, low0, low1 = 110.0, 99.0, 99.5
+        candles: list[Candle] = []
+        candles.append(_c(0, 105, 105.3, 104.7, 105, symbol="M"))
+        candles.append(_c(1, hi - 1, hi + 0.05, hi - 2, hi - 0.5, symbol="M"))
+        candles.append(_c(2, 105, 105.3, 104.7, 105, symbol="M"))
+        candles.append(_c(3, low0 + 1, low0 + 2, low0 - 0.05, low0 + 0.5, symbol="M"))
+        candles.append(_c(4, 105, 105.3, 104.7, 105, symbol="M"))
+        candles.append(_c(5, hi - 1, hi + 0.05, hi - 2, hi - 0.5, symbol="M"))
+        candles.append(_c(6, 105, 105.3, 104.7, 105, symbol="M"))
+        candles.append(_c(7, low1 + 1, low1 + 2, low1 - 0.05, low1 + 0.5, symbol="M"))
+        candles.append(_c(8, 105, 105.3, 104.7, 105, symbol="M"))
+        final_idx = 7
+        end_idx = final_idx + breakout_offset
+        for i in range(9, end_idx + 1):
+            if invalidate_at_offset is not None and i == final_idx + invalidate_at_offset:
+                # Strict close below the rising lower boundary (opposite side)
+                candles.append(_c(i, 98.0, 99.0, 90.0, 91.0, symbol="M"))
+            elif i == end_idx:
+                candles.append(
+                    _c(i, hi + 0.5, hi + 2, hi, hi + 1.5, symbol="M")
+                )
+            else:
+                candles.append(
+                    _c(
+                        i,
+                        fill_close,
+                        fill_close + 0.2,
+                        fill_close - 0.2,
+                        fill_close,
+                        symbol="M",
+                    )
+                )
+        return candles
 
-    def test_expiry_first_and_last_offset(self):
-        d = TriangleDetector(max_bars_to_breakout=3)
-        candles = _build_ascending(n_bars=28)
-        last_i = (candles[-1].epoch - START) // TF
-        # offsets 1,2,3 only; breakout at offset 3 should be eligible
-        for k in range(1, 3):
-            i = last_i + k
-            o, h, l, cl = _quiet(105.0)
-            candles.append(_c(i, o, h, l, cl, symbol="T_ASC"))
-        i = last_i + 3
-        candles.append(_c(i, 110.0, 113.0, 109.0, 112.0, symbol="T_ASC"))
-        obs = d.detect_all_historical(candles)
-        # may or may not confirm depending on swing placement; smoke only
-        assert isinstance(obs, list)
+    def test_opposite_boundary_invalidates_same_candidate(self):
+        """The exact anchor set that would confirm is blocked by opposite close."""
+        # Without invalidation: confirms at offset 10
+        clean = self._minimal_ascending_series(breakout_offset=10)
+        d = TriangleDetector(max_bars_to_breakout=50)
+        clean_obs = [
+            o for o in d.detect_all_historical(clean) if o.type == CONCEPT_ASCENDING
+        ]
+        assert clean_obs, "precondition: clean series must confirm ascending"
+        clean_keys = {tuple(o.reference_ids) for o in clean_obs}
 
-        # offset 4 is outside window
-        d2 = TriangleDetector(max_bars_to_breakout=2)
-        candles2 = _build_ascending(n_bars=28)
-        last_i = (candles2[-1].epoch - START) // TF
-        for k in range(1, 4):
-            i = last_i + k
-            o, h, l, cl = _quiet(105.0)
-            candles2.append(_c(i, o, h, l, cl, symbol="T_ASC"))
-        i = last_i + 4
-        candles2.append(_c(i, 110.0, 113.0, 109.0, 112.0, symbol="T_ASC"))
-        obs2 = d2.detect_all_historical(candles2)
-        for o in obs2:
-            if o.type == CONCEPT_ASCENDING:
-                # confirmed_at must be within max_bars of some final anchor
-                assert o.confirmed_at is not None
+        # With opposite-boundary close at offset 5, then same breakout at 10
+        dirty = self._minimal_ascending_series(
+            breakout_offset=10, invalidate_at_offset=5
+        )
+        dirty_obs = [
+            o for o in d.detect_all_historical(dirty) if o.type == CONCEPT_ASCENDING
+        ]
+        dirty_keys = {tuple(o.reference_ids) for o in dirty_obs}
+        # Every candidate that confirmed cleanly must be absent after invalidation
+        leaked = clean_keys & dirty_keys
+        assert not leaked, (
+            f"invalidated candidate(s) still confirmed: {leaked}"
+        )
+
+    def test_expiry_offset_50_confirms_offset_51_does_not(self):
+        """Same geometry: breakout at final+50 confirms under max_bars=50; final+51 does not."""
+        at_50 = self._minimal_ascending_series(breakout_offset=50)
+        at_51 = self._minimal_ascending_series(breakout_offset=51)
+
+        d50 = TriangleDetector(max_bars_to_breakout=50)
+        conf_50 = [
+            o for o in d50.detect_all_historical(at_50) if o.type == CONCEPT_ASCENDING
+        ]
+        conf_51_under_50 = [
+            o for o in d50.detect_all_historical(at_51) if o.type == CONCEPT_ASCENDING
+        ]
+        assert conf_50, "expected confirmation at offset 50 with max_bars=50"
+        assert not conf_51_under_50, (
+            "must not confirm at offset 51 when max_bars_to_breakout=50"
+        )
+
+        # Sanity: the same offset-51 series *can* confirm when the window allows it
+        d51 = TriangleDetector(max_bars_to_breakout=51)
+        conf_51_under_51 = [
+            o for o in d51.detect_all_historical(at_51) if o.type == CONCEPT_ASCENDING
+        ]
+        assert conf_51_under_51, "precondition: offset 51 confirms under max_bars=51"
 
 
 # ---------------------------------------------------------------------------
@@ -515,16 +553,24 @@ class TestEnumeration:
         assert d.detect_all_historical(candles) == []
 
     def test_overlapping_candidates_preserved(self):
-        candles = _build_ascending(n_bars=36)
-        candles = _append_breakout(candles, direction="bullish", level=110.0, n_extra=5)
+        """Distinct overlapping anchor-ID combinations coexist; identical ones are unique."""
+        from cpab.detectors.swing import SwingPivotDetector
+
+        candles = _build_ascending(n_bars=28, symbol="OV")
         d = TriangleDetector()
-        # enumeration should not crash and may yield multiple
-        highs = []
-        lows = []
-        # exercise _enumerate_candidates via public reconstruct path
-        obs = d.detect_all_historical(candles)
-        ids = [o.id for o in obs]
-        assert len(ids) == len(set(ids))  # unique observation ids
+        sw = SwingPivotDetector()
+        sobs = sw.detect_all_historical(candles)
+        highs = [o for o in sobs if o.type == "swing_high"]
+        lows = [o for o in sobs if o.type == "swing_low"]
+        cands = d._enumerate_candidates(highs, lows)
+        keys = [tuple(a.id for a in c) for c in cands]
+        assert len(keys) == len(set(keys)), "identical ordered anchor-ID sets must appear once"
+        assert len(set(keys)) >= 2, "expected multiple distinct overlapping candidates"
+        # ordered identity (not sorted) — order is part of the combination
+        sorted_keys = [tuple(sorted(k)) for k in keys]
+        # at least some pairs share the same set of ids but differ in order? not required;
+        # required is that distinct combinations survive.
+        assert len(set(sorted_keys)) >= 2
 
     def test_no_arbitrary_caps(self):
         # Long series still processes (may be slow but must not truncate silently)
@@ -565,17 +611,43 @@ class TestCausalityAndGaps:
     def test_gap_splits_segments(self):
         left = _build_ascending(n_bars=28, symbol="GAP")
         left = _append_breakout(left, direction="bullish", level=110.0, n_extra=3)
-        # gap then another segment
         right_start = left[-1].epoch + 10 * TF
         right = _build_ascending(n_bars=28, start=right_start, symbol="GAP")
         right = _append_breakout(right, direction="bullish", level=110.0, n_extra=3)
-        # shift right candles already have correct epochs via start=
         combined = left + right
         d = TriangleDetector()
         obs = d.detect_all_historical(combined)
-        # patterns wholly in left or right remain detectable; none bridge
         for o in obs:
             assert o.symbol == "GAP"
+
+    def test_no_candidate_spans_gap(self):
+        """No emitted observation mixes swing anchors from both sides of a gap."""
+        from cpab.detectors.swing import SwingPivotDetector
+
+        left = _build_ascending(n_bars=24, symbol="GAP2")
+        left = _append_breakout(left, direction="bullish", level=110.0, n_extra=3)
+        gap_start = left[-1].epoch + 10 * TF
+        right = _build_ascending(n_bars=24, start=gap_start, symbol="GAP2")
+        right = _append_breakout(right, direction="bullish", level=110.0, n_extra=3)
+        combined = left + right
+
+        sw = SwingPivotDetector()
+        s_left = {o.id for o in sw.detect_all_historical(left)}
+        s_right = {o.id for o in sw.detect_all_historical(right)}
+        assert s_left.isdisjoint(s_right)
+
+        d = TriangleDetector()
+        obs = d.detect_all_historical(combined)
+        triangle_types = {CONCEPT_ASCENDING, CONCEPT_DESCENDING, CONCEPT_SYMMETRICAL}
+        for o in obs:
+            if o.type not in triangle_types:
+                continue
+            refs = set(o.reference_ids)
+            in_left = refs & s_left
+            in_right = refs & s_right
+            assert not (in_left and in_right), (
+                f"candidate spanned gap: left={in_left} right={in_right}"
+            )
 
     def test_mixed_symbol_rejected(self):
         a = _build_ascending(n_bars=20, symbol="A")
