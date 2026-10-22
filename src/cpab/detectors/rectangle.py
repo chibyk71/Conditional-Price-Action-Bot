@@ -28,6 +28,16 @@ Causality and expiry (aligned with Phase 5A):
     offsets 1 .. max_bars_to_breakout inclusive.
   - Continuous segments processed independently; no gap bridging.
   - At most one confirmation per anchor-ID combination (first qualifying direction).
+  - Candidate enumeration: all alternating chronological *subsequences* with
+    ≥2 highs and ≥2 lows (intermediate swings may be skipped). Safe suffix-count
+    pruning avoids exploring branches that cannot reach the minimum touch counts;
+    no silent truncation of history and no arbitrary anchor-count caps. Candidates
+    are streamed into confirmation. Source swing IDs are unique per entry (first
+    chronological occurrence kept if duplicates appear); index-based traversal of
+    strictly increasing paths therefore yields each anchor-ID combination at most
+    once without a global seen-set. Worst-case *runtime* remains exponential in the
+    number of alternating swings; peak *memory* is O(n swings + recursion depth +
+    confirmed outputs), not O(candidate count).
 
 Configuration (all participate in detector_config_id):
   - boundary_tolerance: relative (default 0.002)
@@ -337,18 +347,10 @@ class RectangleDetector(PriceActionDetector):
         highs = sorted(highs, key=_key)
         lows = sorted(lows, key=_key)
 
-        candidates = self._enumerate_candidates(highs, lows)
-        seen: set[tuple[str, ...]] = set()
+        # Stream candidates into confirmation — same coverage as materializing the
+        # full list, but peak memory tracks one path + confirmed outputs only.
         out: list[Observation] = []
-
-        for anchors in candidates:
-            anchor_ids = tuple(a.id for a in anchors)
-            # Canonical identity: sorted for dedup key, chronological order preserved in payload
-            dedup_key = tuple(sorted(anchor_ids))
-            if dedup_key in seen:
-                continue
-            seen.add(dedup_key)
-
+        for anchors in self._iter_candidates(highs, lows):
             obs = self._try_confirm_candidate(
                 anchors,
                 closed=closed,
@@ -364,54 +366,113 @@ class RectangleDetector(PriceActionDetector):
         highs: list[Observation],
         lows: list[Observation],
     ) -> list[list[Observation]]:
+        """Materialize all candidates (tests / diagnostics). Same coverage as _iter_candidates."""
+        return list(self._iter_candidates(highs, lows))
+
+    def _iter_candidates(
+        self,
+        highs: list[Observation],
+        lows: list[Observation],
+    ):
         """
-        Enumerate all alternating subsequences with ≥2 highs and ≥2 lows.
-        Each candidate is a list of Observations in chronological order.
+        Yield all alternating chronological subsequences with ≥2 highs and ≥2 lows.
+
+        Semantics (Phase 5B contract):
+          - Intermediate swings may be skipped (subsequences, not only contiguous
+            windows of the pivot stream).
+          - Every swing in the continuous segment is eligible; history is never
+            truncated by a fixed swing-count cap.
+          - No maximum anchor-count restriction on a candidate.
+          - Alternation is required in chronological order.
+          - Each distinct anchor-ID combination is yielded at most once.
+
+        Uniqueness (no global seen-set):
+          - Valid SwingPivotDetector output assigns a unique observation id per
+            swing. When building the entry list, if the same id appears more than
+            once the first chronological occurrence is kept.
+          - Recursion only appends strictly increasing indices (start = i+1).
+            Therefore each path is a unique ordered subset of entries, and with
+            unique entry ids each path maps to a unique ordered id sequence.
+          - A global set of sorted-id tuples is unnecessary under these guarantees
+            and would retain O(candidate-count) memory.
+
+        Performance (semantics-preserving):
+          - Index-based recursion with parallel type/id arrays.
+          - Precomputed suffix H/L counts prune branches that cannot reach the
+            minimum touch requirements — proven safe.
+          - Streaming yield avoids retaining the full candidate list.
+          - Peak memory is O(n + recursion depth + confirmed outputs).
+          - Worst-case *runtime* remains exponential in the number of alternating
+            swings; that cost is inherent to exhaustive subsequence enumeration.
         """
-        all_swings: list[tuple[Observation, str]] = []
+        raw: list[tuple[Observation, str, str]] = []
         for o in highs:
             et = _swing_event_time(o)
             if et is None or o.confirmed_at is None:
                 continue
             if _swing_price(o) is None:
                 continue
-            all_swings.append((o, "H"))
+            raw.append((o, "H", o.id))
         for o in lows:
             et = _swing_event_time(o)
             if et is None or o.confirmed_at is None:
                 continue
             if _swing_price(o) is None:
                 continue
-            all_swings.append((o, "L"))
+            raw.append((o, "L", o.id))
 
-        all_swings.sort(
+        raw.sort(
             key=lambda t: (
                 _swing_event_time(t[0]) or 0,
                 t[0].confirmed_at or 0,
-                t[0].id,
+                t[2],
             )
         )
 
-        candidates: list[list[Observation]] = []
+        # Keep first chronological occurrence of each observation id so that
+        # strictly increasing index paths map 1:1 onto unique id combinations.
+        seen_ids: set[str] = set()
+        entries: list[tuple[Observation, str, str]] = []
+        for item in raw:
+            if item[2] in seen_ids:
+                continue
+            seen_ids.add(item[2])
+            entries.append(item)
 
-        def rec(start: int, path: list[Observation], path_types: list[str]) -> None:
-            if len(path) >= 4:
-                nh = sum(1 for t in path_types if t == "H")
-                nl = len(path) - nh
-                if nh >= 2 and nl >= 2:
-                    candidates.append(list(path))
-            for i in range(start, len(all_swings)):
-                o, typ = all_swings[i]
-                if path_types and typ == path_types[-1]:
-                    continue  # must alternate
-                path.append(o)
-                path_types.append(typ)
-                rec(i + 1, path, path_types)
-                path.pop()
-                path_types.pop()
+        n = len(entries)
+        if n < 4:
+            return
 
-        rec(0, [], [])
-        return candidates
+        obs = [e[0] for e in entries]
+        types = [e[1] for e in entries]
+        ids = [e[2] for e in entries]
+
+        suffix_h = [0] * (n + 1)
+        suffix_l = [0] * (n + 1)
+        for i in range(n - 1, -1, -1):
+            suffix_h[i] = suffix_h[i + 1] + (1 if types[i] == "H" else 0)
+            suffix_l[i] = suffix_l[i + 1] + (1 if types[i] == "L" else 0)
+
+        path_idx: list[int] = []
+
+        def rec(start: int, last_typ: str | None, nh: int, nl: int):
+            if nh + suffix_h[start] < 2 or nl + suffix_l[start] < 2:
+                return
+            if len(path_idx) >= 4 and nh >= 2 and nl >= 2:
+                yield [obs[i] for i in path_idx]
+            for i in range(start, n):
+                typ = types[i]
+                if last_typ is not None and typ == last_typ:
+                    continue
+                next_nh = nh + (1 if typ == "H" else 0)
+                next_nl = nl + (1 if typ == "L" else 0)
+                if next_nh + suffix_h[i + 1] < 2 or next_nl + suffix_l[i + 1] < 2:
+                    continue
+                path_idx.append(i)
+                yield from rec(i + 1, typ, next_nh, next_nl)
+                path_idx.pop()
+
+        yield from rec(0, None, 0, 0)
 
     def _try_confirm_candidate(
         self,
