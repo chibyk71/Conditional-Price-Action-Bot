@@ -495,6 +495,48 @@ class CapabilityRegistry:
                 }
                 s = left + 1 + right
                 mh = 5 * s + 1
+            elif impl == "rectangle":
+                from cpab.detectors.swing import _validate_strength, _validate_tie_policy
+                from cpab.detectors.rectangle import (
+                    _validate_boundary_tolerance,
+                    _validate_max_bars_to_breakout,
+                    DEFAULT_BOUNDARY_TOLERANCE,
+                    DEFAULT_MAX_BARS_TO_BREAKOUT,
+                )
+
+                defaults = {
+                    "boundary_tolerance": DEFAULT_BOUNDARY_TOLERANCE,
+                    "max_bars_to_breakout": DEFAULT_MAX_BARS_TO_BREAKOUT,
+                    "left_strength": 1,
+                    "right_strength": 1,
+                    "tie_policy": "strict",
+                }
+                merged = dict(defaults)
+                merged.update(effective)
+                if accepted is not None:
+                    for key, val in config.items():
+                        if key in accepted:
+                            merged[key] = val
+                tol = _validate_boundary_tolerance(
+                    merged.get("boundary_tolerance", DEFAULT_BOUNDARY_TOLERANCE)
+                )
+                max_bars = _validate_max_bars_to_breakout(
+                    merged.get("max_bars_to_breakout", DEFAULT_MAX_BARS_TO_BREAKOUT)
+                )
+                left = _validate_strength("left_strength", merged.get("left_strength", 1))
+                right = _validate_strength(
+                    "right_strength", merged.get("right_strength", 1)
+                )
+                policy = _validate_tie_policy(merged.get("tie_policy", "strict"))
+                effective = {
+                    "boundary_tolerance": tol,
+                    "max_bars_to_breakout": max_bars,
+                    "left_strength": left,
+                    "right_strength": right,
+                    "tie_policy": policy,
+                }
+                s = left + 1 + right
+                mh = 4 * s + 1
             else:
                 mh = entry["min_history"]
                 if mh is None and entry.get("pattern"):
@@ -978,6 +1020,39 @@ def build_default_registry() -> CapabilityRegistry:
         ],
         min_history=16,
         implementation="classical_reversal",
+    )
+
+    def _rectangle_factory(
+        cfg: Optional[dict[str, Any]] = None,
+    ) -> PriceActionDetector:
+        from cpab.detectors.rectangle import RectangleDetector
+
+        c = dict(cfg or {})
+        return RectangleDetector(
+            boundary_tolerance=c.get("boundary_tolerance", 0.002),
+            max_bars_to_breakout=c.get("max_bars_to_breakout", 50),
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
+            detector_id="rectangle",
+        )
+
+    reg.register(
+        "rectangle",
+        concepts=[
+            "rectangle",
+        ],
+        factory=_rectangle_factory,
+        config={},
+        accepted_params=[
+            "boundary_tolerance",
+            "max_bars_to_breakout",
+            "left_strength",
+            "right_strength",
+            "tie_policy",
+        ],
+        min_history=13,
+        implementation="rectangle",
     )
 
     return reg
