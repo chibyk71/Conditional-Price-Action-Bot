@@ -41,11 +41,13 @@ Variant is always `swing_based_v1`.
   chronological order preserved in the payload). Overlapping candidates with distinct anchors
   may coexist.
 - At most one confirmation per anchor combination (first qualifying breakout direction).
-- **Candidate formation**: contiguous alternating windows inside maximal alternating runs of
-  the chronological swing stream (not exhaustive subsequences). Operational bounds:
-  at most 32 most-recent swings per segment for enumeration, and at most 12 anchors per
-  candidate window. This keeps work O(n²) and avoids exponential blow-up on long histories
-  while preserving min-touch, alternation, tolerance, and causality contracts.
+- **Candidate formation**: all alternating chronological *subsequences* with ≥2 highs and
+  ≥2 lows. Intermediate swings may be skipped. History within a continuous segment is never
+  truncated by a fixed swing-count cap; there is no maximum anchor-count restriction.
+  Safe suffix-count pruning drops only branches that cannot reach the minimum touch counts.
+  Worst-case combinatorial cost is exponential in the number of alternating swings in a
+  continuous segment; that cost is inherent to exhaustive subsequence enumeration and is
+  not mitigated by silently narrowing valid coverage.
 
 ## Configuration
 

@@ -511,10 +511,16 @@ class TestDataIntegrity:
         assert [o.payload for o in a] == [o.payload for o in b]
 
     def test_incremental_matches_historical(self):
-        support, resistance = 100.0, 110.0
+        """For every prefix, detect(prefix) equals historical observations confirmed
+        on that prefix's last bar — same ids, anchors, direction, and timestamps.
+
+        This is the incremental contract (not a one-way subset check). Confirmation
+        bars are placed after min_history so the gate does not suppress emission.
+        """
         mid = 105.0
+        # min_history for strength 1 is 13; put structure early, breakout at bar 14
         candles = []
-        for i in range(16):
+        for i in range(20):
             if i == 1:
                 candles.append(_c(i, 108, 110.0, 107, 109))
             elif i == 3:
@@ -523,24 +529,36 @@ class TestDataIntegrity:
                 candles.append(_c(i, 108, 110.0, 107, 109))
             elif i == 7:
                 candles.append(_c(i, 102, 103, 100.0, 101))
-            elif i == 9:
+            elif i == 14:
                 candles.append(_c(i, 109, 112, 108.5, 111.0))
             else:
                 candles.append(_c(i, mid, mid + 0.3, mid - 0.3, mid))
-        d = RectangleDetector(boundary_tolerance=0.01, max_bars_to_breakout=10)
+        d = RectangleDetector(boundary_tolerance=0.01, max_bars_to_breakout=20)
         hist = d.detect_all_historical(candles)
-        # incremental at the breakout bar
-        inc = d.detect(candles)
-        # all incremental obs must appear in historical
-        hist_ids = {o.id for o in hist}
-        for o in inc:
-            assert o.id in hist_ids
+        assert len(hist) >= 1
+        for k in range(d.min_history, len(candles) + 1):
+            prefix = candles[:k]
+            latest = prefix[-1].epoch
+            inc = d.detect(prefix)
+            exp = [o for o in hist if o.confirmed_at == latest]
+            assert sorted(o.id for o in inc) == sorted(o.id for o in exp)
+            by_id = {o.id: o for o in exp}
+            for o in inc:
+                h = by_id[o.id]
+                assert o.direction == h.direction
+                assert o.confirmed_at == h.confirmed_at
+                assert o.event_time == h.event_time
+                assert o.reference_ids == h.reference_ids
+                assert o.payload.get("support") == h.payload.get("support")
+                assert o.payload.get("resistance") == h.payload.get("resistance")
+                assert o.payload.get("breakout_close") == h.payload.get("breakout_close")
 
 
 
-class TestEnumerationBounds:
-    def test_contiguous_windows_only_alternating(self):
-        """Enumerate never returns a non-alternating window."""
+class TestEnumerationSemantics:
+    """Regression: QA must not silently narrow Phase 5B candidate coverage."""
+
+    def test_alternating_only(self):
         mid = 105.0
         candles = []
         for i in range(24):
@@ -561,47 +579,185 @@ class TestEnumerationBounds:
         for anchors in cands:
             types = [a.type for a in anchors]
             assert len(anchors) >= 4
-            assert len(anchors) <= d._MAX_ANCHORS_PER_CANDIDATE
             for a, b in zip(types, types[1:]):
                 assert a != b
             nh = sum(1 for t in types if t == "swing_high")
             nl = len(types) - nh
             assert nh >= 2 and nl >= 2
 
-    def test_enumeration_scales_quadratically_not_exponentially(self):
-        """Candidate count grows polynomially with swing count, not 2^n.
-
-        Build a long perfectly alternating pivot stream and assert the number
-        of candidates stays within the O(n²) contiguous-window bound.
-        """
+    def test_long_anchor_sequence_not_capped(self):
+        """A valid candidate with more than 12 anchors is not silently excluded."""
+        from cpab.detectors.swing import SwingPivotDetector
+        # 28 bars alternating → ~14 pivots; full path length 14 > 12 without
+        # pathological 2^n cost from much longer streams.
         mid = 105.0
-        n_bars = 80
+        res, sup = 110.0, 100.0
+        n_bars = 28
         candles = []
         for i in range(n_bars):
+            if i % 4 == 1:
+                candles.append(_c(i, 108, res, 107, 109))
+            elif i % 4 == 3:
+                candles.append(_c(i, 102, 103, sup, 101))
+            else:
+                candles.append(_c(i, mid, mid + 0.3, mid - 0.3, mid))
+        d = RectangleDetector(boundary_tolerance=0.01, max_bars_to_breakout=5)
+        sw = SwingPivotDetector()
+        sobs = sw.detect_all_historical(candles)
+        highs = [o for o in sobs if o.type == "swing_high"]
+        lows = [o for o in sobs if o.type == "swing_low"]
+        cands = d._enumerate_candidates(highs, lows)
+        long_ones = [c for c in cands if len(c) > 12]
+        assert len(highs) + len(lows) > 12
+        assert len(long_ones) >= 1, (
+            f"expected candidates with >12 anchors; got max len "
+            f"{max((len(c) for c in cands), default=0)} from {len(cands)} candidates"
+        )
+
+    def test_older_swings_not_truncated(self):
+        """Older swings remain eligible when the segment has more than 32 swings.
+
+        Uses synthetic swing observations so we control count and alternation
+        depth: a short alternating prefix (includes the oldest swing) followed
+        by many same-type-heavy swings. The removed 32-swing cap would drop the
+        oldest; full enumeration must still include it.
+        """
+        from cpab.models import Observation
+
+        def mk(i: int, typ: str, price: float) -> Observation:
+            ep = START + i * TF
+            return Observation.create(
+                type=typ,
+                symbol="R_100",
+                timeframe="1m",
+                candle_epoch=ep,
+                id=f"{typ}|synth|{i}",
+                event_time=ep,
+                confirmed_at=ep + TF,
+                detector_id="swing_pivot",
+                detector_config_id="cfg:test",
+                payload={"price": price},
+                metadata={"price": price},
+            )
+
+        # H L H L (oldest at i=0) then 40 additional swings with limited alternation
+        highs = [
+            mk(0, "swing_high", 110.0),
+            mk(2, "swing_high", 110.0),
+        ]
+        lows = [
+            mk(1, "swing_low", 100.0),
+            mk(3, "swing_low", 100.0),
+        ]
+        # 30 more highs and 5 more lows interleaved sparsely → total > 32
+        for j in range(30):
+            highs.append(mk(10 + j, "swing_high", 110.0 + j * 0.001))
+        for j in range(5):
+            lows.append(mk(50 + j * 2, "swing_low", 100.0 - j * 0.001))
+
+        d = RectangleDetector(boundary_tolerance=0.05, max_bars_to_breakout=5)
+        n_swings = len(highs) + len(lows)
+        assert n_swings > 32, f"need >32 swings, got {n_swings}"
+        cands = d._enumerate_candidates(highs, lows)
+        assert any(
+            "swing_high|synth|0" in {a.id for a in c} for c in cands
+        ), "oldest swing was dropped from all candidates (truncation)"
+
+    def test_skip_intermediate_swing_still_evaluated(self):
+        """A valid combination that skips an intermediate swing is still a candidate."""
+        from cpab.detectors.swing import SwingPivotDetector
+        mid = 105.0
+        # Pivots: H0 L1 H2 L3 H4 — subsequence H0,L1,H2,L3 and H0,L1,H4,L3 etc.
+        candles = []
+        for i in range(24):
             if i % 4 == 1:
                 candles.append(_c(i, 108, 110.0, 107, 109))
             elif i % 4 == 3:
                 candles.append(_c(i, 102, 103, 100.0, 101))
             else:
                 candles.append(_c(i, mid, mid + 0.3, mid - 0.3, mid))
-        d = RectangleDetector(boundary_tolerance=0.02, max_bars_to_breakout=5)
+        d = RectangleDetector(boundary_tolerance=0.02, max_bars_to_breakout=10)
+        sw = SwingPivotDetector()
+        sobs = sw.detect_all_historical(candles)
+        highs = sorted(
+            [o for o in sobs if o.type == "swing_high"],
+            key=lambda o: o.event_time or 0,
+        )
+        lows = sorted(
+            [o for o in sobs if o.type == "swing_low"],
+            key=lambda o: o.event_time or 0,
+        )
+        assert len(highs) >= 3 and len(lows) >= 2
+        cands = d._enumerate_candidates(highs, lows)
+        # Look for a candidate that includes first and third high but skips the second
+        h0, h2 = highs[0].id, highs[2].id
+        h1 = highs[1].id
+        skipped = [
+            c for c in cands
+            if h0 in {a.id for a in c}
+            and h2 in {a.id for a in c}
+            and h1 not in {a.id for a in c}
+        ]
+        assert len(skipped) >= 1, "no candidate skips an intermediate swing"
+
+    def test_overlapping_distinct_and_identical_deduped(self):
+        """Distinct overlapping anchor sets coexist; identical sets are deduplicated."""
         from cpab.detectors.swing import SwingPivotDetector
+        mid = 105.0
+        candles = []
+        for i in range(28):
+            if i % 4 == 1:
+                candles.append(_c(i, 108, 110.0, 107, 109))
+            elif i % 4 == 3:
+                candles.append(_c(i, 102, 103, 100.0, 101))
+            else:
+                candles.append(_c(i, mid, mid + 0.3, mid - 0.3, mid))
+        d = RectangleDetector(boundary_tolerance=0.02, max_bars_to_breakout=10)
         sw = SwingPivotDetector()
         sobs = sw.detect_all_historical(candles)
         highs = [o for o in sobs if o.type == "swing_high"]
         lows = [o for o in sobs if o.type == "swing_low"]
-        n_swings = len(highs) + len(lows)
         cands = d._enumerate_candidates(highs, lows)
-        # Contiguous windows of length 4..min(n, MAX) over a run of length n
-        # yield at most n * MAX windows; with the swing cap, hard upper bound:
-        max_n = min(n_swings, d._MAX_SWINGS_FOR_ENUMERATION)
-        max_len = d._MAX_ANCHORS_PER_CANDIDATE
-        # loose upper bound: runs * windows_per_run < max_n * max_n
-        assert len(cands) <= max_n * max_n
-        # and far below exponential 2^n for n >= 16
-        if max_n >= 16:
-            assert len(cands) < 2 ** (max_n // 2)
+        keys = [tuple(sorted(a.id for a in c)) for c in cands]
+        assert len(keys) == len(set(keys)), "identical anchor-ID sets were not deduplicated"
+        assert len(set(keys)) >= 2, "expected multiple distinct overlapping candidates"
 
+    def test_no_candidate_spans_gap(self):
+        """Candidates never mix anchors from opposite sides of a candle gap."""
+        from cpab.detectors.swing import SwingPivotDetector
+        mid = 105.0
+        c1 = []
+        for i in range(16):
+            if i % 4 == 1:
+                c1.append(_c(i, 108, 110.0, 107, 109))
+            elif i % 4 == 3:
+                c1.append(_c(i, 102, 103, 100.0, 101))
+            else:
+                c1.append(_c(i, mid, mid + 0.3, mid - 0.3, mid))
+        gap_start = START + 40 * TF
+        c2 = []
+        for i in range(16):
+            if i % 4 == 1:
+                c2.append(_c(i, 108, 110.0, 107, 109, start=gap_start))
+            elif i % 4 == 3:
+                c2.append(_c(i, 102, 103, 100.0, 101, start=gap_start))
+            elif i == 14:
+                c2.append(_c(i, 109, 112, 108.5, 111.0, start=gap_start))
+            else:
+                c2.append(_c(i, mid, mid + 0.3, mid - 0.3, mid, start=gap_start))
+        d = RectangleDetector(boundary_tolerance=0.02, max_bars_to_breakout=10)
+        obs = d.detect_all_historical(c1 + c2)
+        # Swing event times on each side of the gap
+        sw = SwingPivotDetector()
+        s1 = {o.id for o in sw.detect_all_historical(c1)}
+        s2 = {o.id for o in sw.detect_all_historical(c2)}
+        for o in obs:
+            if o.type != CONCEPT_RECTANGLE:
+                continue
+            refs = set(o.reference_ids)
+            in1 = refs & s1
+            in2 = refs & s2
+            assert not (in1 and in2), "candidate spanned the data gap"
 
 class TestRegistry:
     def _require_talib(self):
