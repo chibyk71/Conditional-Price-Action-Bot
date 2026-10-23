@@ -48,6 +48,14 @@ Phase 5A: classical_reversal — similarity_tolerance (default 0.002),
 max_bars_to_breakout (default 50), plus left/right_strength and tie_policy
 forwarded to SwingPivotDetector. Emits double_top, double_bottom,
 head_and_shoulders, inverse_head_and_shoulders.
+
+Phase 5B: rectangle — boundary_tolerance (default 0.002),
+max_bars_to_breakout (default 50), plus left/right_strength and tie_policy.
+
+Phase 5C: triangle — boundary_tolerance (default 0.002),
+horizontal_tolerance (default 0.002), max_bars_to_breakout (default 50),
+plus left/right_strength and tie_policy. Emits ascending_triangle,
+descending_triangle, symmetrical_triangle.
 """
 
 from __future__ import annotations
@@ -530,6 +538,56 @@ class CapabilityRegistry:
                 policy = _validate_tie_policy(merged.get("tie_policy", "strict"))
                 effective = {
                     "boundary_tolerance": tol,
+                    "max_bars_to_breakout": max_bars,
+                    "left_strength": left,
+                    "right_strength": right,
+                    "tie_policy": policy,
+                }
+                s = left + 1 + right
+                mh = 4 * s + 1
+            elif impl == "triangle":
+                from cpab.detectors.swing import _validate_strength, _validate_tie_policy
+                from cpab.detectors.triangle import (
+                    _validate_tolerance,
+                    _validate_max_bars_to_breakout,
+                    DEFAULT_BOUNDARY_TOLERANCE,
+                    DEFAULT_HORIZONTAL_TOLERANCE,
+                    DEFAULT_MAX_BARS_TO_BREAKOUT,
+                )
+
+                defaults = {
+                    "boundary_tolerance": DEFAULT_BOUNDARY_TOLERANCE,
+                    "horizontal_tolerance": DEFAULT_HORIZONTAL_TOLERANCE,
+                    "max_bars_to_breakout": DEFAULT_MAX_BARS_TO_BREAKOUT,
+                    "left_strength": 1,
+                    "right_strength": 1,
+                    "tie_policy": "strict",
+                }
+                merged = dict(defaults)
+                merged.update(effective)
+                if accepted is not None:
+                    for key, val in config.items():
+                        if key in accepted:
+                            merged[key] = val
+                btol = _validate_tolerance(
+                    "boundary_tolerance",
+                    merged.get("boundary_tolerance", DEFAULT_BOUNDARY_TOLERANCE),
+                )
+                htol = _validate_tolerance(
+                    "horizontal_tolerance",
+                    merged.get("horizontal_tolerance", DEFAULT_HORIZONTAL_TOLERANCE),
+                )
+                max_bars = _validate_max_bars_to_breakout(
+                    merged.get("max_bars_to_breakout", DEFAULT_MAX_BARS_TO_BREAKOUT)
+                )
+                left = _validate_strength("left_strength", merged.get("left_strength", 1))
+                right = _validate_strength(
+                    "right_strength", merged.get("right_strength", 1)
+                )
+                policy = _validate_tie_policy(merged.get("tie_policy", "strict"))
+                effective = {
+                    "boundary_tolerance": btol,
+                    "horizontal_tolerance": htol,
                     "max_bars_to_breakout": max_bars,
                     "left_strength": left,
                     "right_strength": right,
@@ -1053,6 +1111,44 @@ def build_default_registry() -> CapabilityRegistry:
         ],
         min_history=13,
         implementation="rectangle",
+    )
+
+    def _triangle_factory(
+        cfg: Optional[dict[str, Any]] = None,
+    ) -> PriceActionDetector:
+        from cpab.detectors.triangle import TriangleDetector
+
+        c = dict(cfg or {})
+        return TriangleDetector(
+            boundary_tolerance=c.get("boundary_tolerance", 0.002),
+            horizontal_tolerance=c.get("horizontal_tolerance", 0.002),
+            max_bars_to_breakout=c.get("max_bars_to_breakout", 50),
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
+            detector_id="triangle",
+        )
+
+    reg.register(
+        "triangle",
+        concepts=[
+            "ascending_triangle",
+            "descending_triangle",
+            "symmetrical_triangle",
+            "triangle",
+        ],
+        factory=_triangle_factory,
+        config={},
+        accepted_params=[
+            "boundary_tolerance",
+            "horizontal_tolerance",
+            "max_bars_to_breakout",
+            "left_strength",
+            "right_strength",
+            "tie_policy",
+        ],
+        min_history=13,
+        implementation="triangle",
     )
 
     return reg
