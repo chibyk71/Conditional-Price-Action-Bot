@@ -22,6 +22,7 @@ from cpab.detectors.inverse_fair_value_gap import InverseFairValueGapDetector
 from cpab.detectors.order_block import OrderBlockDetector
 from cpab.detectors.breaker_block import BreakerBlockDetector
 from cpab.detectors.mitigation_block import MitigationBlockDetector
+from cpab.detectors.flags_pennants import FlagsPennantsDetector
 
 __all__ = [
     "PriceActionDetector",
@@ -41,6 +42,7 @@ __all__ = [
     "OrderBlockDetector",
     "BreakerBlockDetector",
     "MitigationBlockDetector",
+    "FlagsPennantsDetector",
     "evaluate_raw",
     "AdapterOutcomeKind",
     "CapabilityRegistry",

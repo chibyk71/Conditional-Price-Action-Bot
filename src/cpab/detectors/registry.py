@@ -56,6 +56,12 @@ Phase 5C: triangle — boundary_tolerance (default 0.002),
 horizontal_tolerance (default 0.002), max_bars_to_breakout (default 50),
 plus left/right_strength and tie_policy. Emits ascending_triangle,
 descending_triangle, symmetrical_triangle.
+
+Phase 5D: flags_pennants — pole (min/max bars, ATR lookback, strength mult,
+max retracement), consolidation (min/max bars), boundary_tolerance,
+parallel_slope_tolerance, max_bars_to_breakout, plus left/right_strength
+and tie_policy. Emits bullish_flag, bearish_flag, bullish_pennant,
+bearish_pennant.
 """
 
 from __future__ import annotations
@@ -595,6 +601,74 @@ class CapabilityRegistry:
                 }
                 s = left + 1 + right
                 mh = 4 * s + 1
+            elif impl == "flags_pennants":
+                from cpab.detectors.swing import _validate_strength, _validate_tie_policy
+                from cpab.detectors.flags_pennants import (
+                    DEFAULT_MIN_POLE_BARS,
+                    DEFAULT_MAX_POLE_BARS,
+                    DEFAULT_POLE_ATR_LOOKBACK,
+                    DEFAULT_POLE_STRENGTH_MULT,
+                    DEFAULT_MAX_POLE_RETRACEMENT,
+                    DEFAULT_MIN_CONSOLIDATION_BARS,
+                    DEFAULT_MAX_CONSOLIDATION_BARS,
+                    DEFAULT_BOUNDARY_TOLERANCE,
+                    DEFAULT_PARALLEL_SLOPE_TOLERANCE,
+                    DEFAULT_MAX_BARS_TO_BREAKOUT,
+                )
+
+                defaults = {
+                    "min_pole_bars": DEFAULT_MIN_POLE_BARS,
+                    "max_pole_bars": DEFAULT_MAX_POLE_BARS,
+                    "pole_atr_lookback": DEFAULT_POLE_ATR_LOOKBACK,
+                    "pole_strength_mult": DEFAULT_POLE_STRENGTH_MULT,
+                    "max_pole_retracement": DEFAULT_MAX_POLE_RETRACEMENT,
+                    "min_consolidation_bars": DEFAULT_MIN_CONSOLIDATION_BARS,
+                    "max_consolidation_bars": DEFAULT_MAX_CONSOLIDATION_BARS,
+                    "boundary_tolerance": DEFAULT_BOUNDARY_TOLERANCE,
+                    "parallel_slope_tolerance": DEFAULT_PARALLEL_SLOPE_TOLERANCE,
+                    "max_bars_to_breakout": DEFAULT_MAX_BARS_TO_BREAKOUT,
+                    "left_strength": 1,
+                    "right_strength": 1,
+                    "tie_policy": "strict",
+                }
+                merged = dict(defaults)
+                merged.update(effective)
+                if accepted is not None:
+                    for key, val in config.items():
+                        if key in accepted:
+                            merged[key] = val
+                left = _validate_strength("left_strength", merged.get("left_strength", 1))
+                right = _validate_strength(
+                    "right_strength", merged.get("right_strength", 1)
+                )
+                policy = _validate_tie_policy(merged.get("tie_policy", "strict"))
+                effective = {
+                    "min_pole_bars": int(merged["min_pole_bars"]),
+                    "max_pole_bars": int(merged["max_pole_bars"]),
+                    "pole_atr_lookback": int(merged["pole_atr_lookback"]),
+                    "pole_strength_mult": float(merged["pole_strength_mult"]),
+                    "max_pole_retracement": float(merged["max_pole_retracement"]),
+                    "min_consolidation_bars": int(merged["min_consolidation_bars"]),
+                    "max_consolidation_bars": int(merged["max_consolidation_bars"]),
+                    "boundary_tolerance": float(merged["boundary_tolerance"]),
+                    "parallel_slope_tolerance": float(
+                        merged["parallel_slope_tolerance"]
+                    ),
+                    "max_bars_to_breakout": int(merged["max_bars_to_breakout"]),
+                    "left_strength": left,
+                    "right_strength": right,
+                    "tie_policy": policy,
+                }
+                mh = (
+                    int(merged["pole_atr_lookback"])
+                    + 1
+                    + int(merged["max_pole_bars"])
+                    + int(merged["max_consolidation_bars"])
+                    + int(merged["max_bars_to_breakout"])
+                    + left
+                    + right
+                    + 2
+                )
             else:
                 mh = entry["min_history"]
                 if mh is None and entry.get("pattern"):
@@ -1149,6 +1223,59 @@ def build_default_registry() -> CapabilityRegistry:
         ],
         min_history=13,
         implementation="triangle",
+    )
+
+    def _flags_pennants_factory(
+        cfg: Optional[dict[str, Any]] = None,
+    ) -> PriceActionDetector:
+        from cpab.detectors.flags_pennants import FlagsPennantsDetector
+
+        c = dict(cfg or {})
+        return FlagsPennantsDetector(
+            min_pole_bars=c.get("min_pole_bars", 2),
+            max_pole_bars=c.get("max_pole_bars", 10),
+            pole_atr_lookback=c.get("pole_atr_lookback", 14),
+            pole_strength_mult=c.get("pole_strength_mult", 1.5),
+            max_pole_retracement=c.get("max_pole_retracement", 0.50),
+            min_consolidation_bars=c.get("min_consolidation_bars", 3),
+            max_consolidation_bars=c.get("max_consolidation_bars", 20),
+            boundary_tolerance=c.get("boundary_tolerance", 0.002),
+            parallel_slope_tolerance=c.get("parallel_slope_tolerance", 0.002),
+            max_bars_to_breakout=c.get("max_bars_to_breakout", 50),
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
+            detector_id="flags_pennants",
+        )
+
+    reg.register(
+        "flags_pennants",
+        concepts=[
+            "bullish_flag",
+            "bearish_flag",
+            "bullish_pennant",
+            "bearish_pennant",
+            "flags_pennants",
+        ],
+        factory=_flags_pennants_factory,
+        config={},
+        accepted_params=[
+            "min_pole_bars",
+            "max_pole_bars",
+            "pole_atr_lookback",
+            "pole_strength_mult",
+            "max_pole_retracement",
+            "min_consolidation_bars",
+            "max_consolidation_bars",
+            "boundary_tolerance",
+            "parallel_slope_tolerance",
+            "max_bars_to_breakout",
+            "left_strength",
+            "right_strength",
+            "tie_policy",
+        ],
+        min_history=50,
+        implementation="flags_pennants",
     )
 
     return reg
