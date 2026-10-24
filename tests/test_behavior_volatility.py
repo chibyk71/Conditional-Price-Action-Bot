@@ -462,3 +462,145 @@ def test_min_history_constants_match_contract():
     assert ATRExpansionDetector().min_history == 35
     assert ATRContractionDetector().min_history == 35
     assert RangeExpansionDetector().min_history == 16
+
+
+# ---------------------------------------------------------------------------
+# Crossing-only correctness (PR #22 review)
+# ---------------------------------------------------------------------------
+
+
+def test_first_evaluable_ratio_beyond_threshold_not_emitted():
+    """
+    At the first evaluable index (start_i), previous ratio is unavailable.
+    Even if the current ratio is already beyond the threshold, no observation
+    may be emitted — unavailable previous is unknown, not a crossing.
+    """
+    n = 50
+    candles: list[Candle] = []
+    for i in range(n):
+        # Flat base; single huge bar at first evaluable index (34)
+        hr = 50.0 if i == 34 else 1.0
+        mid = 100.0
+        candles.append(_c(i, mid, mid + hr, mid - hr, mid))
+    det = ATRExpansionDetector()
+    assert det.min_history == 35
+    obs = det.detect_all_historical(candles)
+    # Must not emit at epoch of bar 34 (first evaluable, unknown prev)
+    target = candles[34].epoch
+    at_first = [o for o in obs if o.event_time == target]
+    assert at_first == [], (
+        f"false crossing at first evaluable bar: {[o.payload for o in at_first]}"
+    )
+
+
+def test_sustained_regime_emits_only_on_crossing():
+    """Once in regime, continued membership must not re-emit."""
+    candles = _build_expansion_series()
+    det = ATRExpansionDetector()
+    obs = det.detect_all_historical(candles)
+    assert len(obs) >= 1
+    epochs = [o.event_time for o in obs]
+    # No two emissions on consecutive bars
+    for a, b in zip(epochs, epochs[1:]):
+        assert b - a > TF
+    # If we truncated to just after first emission, later sustained bars
+    # in the full series must not add extra consecutive hits
+    first_epoch = epochs[0]
+    # All emissions after first should still be isolated crossings (re-entry)
+    for o in obs:
+        assert o.payload["ratio"] >= EXPANSION_MULT
+
+
+def test_genuine_crossing_emits_once():
+    """
+    Flat regime (ratio ~ 1) then sustained high vol produces exactly one
+    expansion at the transition, not on the first evaluable bar alone.
+    """
+    n = 80
+    candles: list[Candle] = []
+    for i in range(n):
+        hr = 1.0 if i < 50 else 4.0
+        mid = 100.0
+        candles.append(_c(i, mid, mid + hr, mid - hr, mid))
+    det = ATRExpansionDetector()
+    obs = det.detect_all_historical(candles)
+    assert len(obs) >= 1
+    # First emission must be strictly after warm-up start and after vol step-up
+    first = min(o.event_time for o in obs)
+    assert first > candles[34].epoch  # not the first evaluable bar under flat
+    assert first >= candles[50].epoch  # only after high-vol begins
+
+
+def test_unavailable_previous_ratio_not_treated_as_crossing():
+    """
+    Invalid OHLC that nullifies the previous ATR makes previous regime
+    unknown. Current bar beyond threshold must not emit.
+    """
+    n = 60
+    candles: list[Candle] = []
+    for i in range(n):
+        # Elevate vol late so ratio can exceed threshold
+        hr = 1.0 if i < 45 else 5.0
+        mid = 100.0
+        candles.append(_c(i, mid, mid + hr, mid - hr, mid))
+    det = ATRExpansionDetector()
+    # Find a bar that would otherwise be a crossing candidate after vol step
+    baseline_obs = det.detect_all_historical(candles)
+    if not baseline_obs:
+        # Force a clearer step if synthetic series failed to cross
+        candles = []
+        for i in range(n):
+            hr = 1.0 if i < 40 else 8.0
+            mid = 100.0
+            candles.append(_c(i, mid, mid + hr, mid - hr, mid))
+        baseline_obs = det.detect_all_historical(candles)
+    assert len(baseline_obs) >= 1
+    cross_epoch = baseline_obs[0].event_time
+    cross_idx = next(i for i, c in enumerate(candles) if c.epoch == cross_epoch)
+    # Corrupt the bar immediately before the crossing so prev ATR is None
+    bad_i = cross_idx - 1
+    assert bad_i >= 0
+    bad = candles[bad_i]
+    candles[bad_i] = Candle(
+        symbol=bad.symbol,
+        timeframe=bad.timeframe,
+        epoch=bad.epoch,
+        open=100.0,
+        high=90.0,  # high < low → invalid
+        low=110.0,
+        close=100.0,
+        is_closed=True,
+        source=bad.source,
+    )
+    obs = det.detect_all_historical(candles)
+    # The original crossing bar must not emit (prev state unknown)
+    at_cross = [o for o in obs if o.event_time == cross_epoch]
+    assert at_cross == [], (
+        f"emitted despite unknown previous ratio: {[o.payload for o in at_cross]}"
+    )
+
+
+def test_contraction_first_evaluable_not_emitted():
+    """Symmetric check for atr_contraction at first evaluable index."""
+    n = 50
+    # High vol throughout so first evaluable ratio is already contracted? 
+    # Actually for contraction we need ratio <= 0.75 at first evaluable with
+    # unknown prev → still no emit.
+    # Build: very high early ranges then collapse at index 34.
+    candles: list[Candle] = []
+    for i in range(n):
+        hr = 5.0 if i < 34 else 0.3
+        mid = 100.0
+        candles.append(_c(i, mid, mid + hr, mid - hr, mid))
+    det = ATRContractionDetector()
+    obs = det.detect_all_historical(candles)
+    target = candles[34].epoch
+    at_first = [o for o in obs if o.event_time == target]
+    assert at_first == []
+
+
+def test_min_history_unchanged_after_crossing_fix():
+    """Locked 35-bar warm-up must remain after the crossing-state fix."""
+    assert ATRExpansionDetector().min_history == 35
+    assert ATRContractionDetector().min_history == 35
+    assert MIN_HISTORY_ATR_REGIME == 35
