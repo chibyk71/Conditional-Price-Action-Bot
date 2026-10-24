@@ -248,9 +248,18 @@ class _ATRRegimeDetector(PriceActionDetector):
             if not _finite(ratio):
                 continue
 
-            # Previous bar state for crossing detection
+            # Current regime membership
+            if self._crossing == "above":
+                now = ratio >= self._thr
+            else:
+                now = ratio <= self._thr
+            if not now:
+                continue
+
+            # Crossing requires a *demonstrably opposite* previous evaluable ratio.
+            # Unavailable / invalid previous state is unknown — not a crossing.
             prev_i = i - 1
-            prev_expanded = False
+            prev_in_regime: Optional[bool] = None
             if prev_i >= start_i:
                 prev_atr = atrs[prev_i]
                 prev_base = _baseline_mean(atrs, prev_i, window=self._baseline_window)
@@ -263,17 +272,12 @@ class _ATRRegimeDetector(PriceActionDetector):
                     prev_ratio = prev_atr / prev_base
                     if _finite(prev_ratio):
                         if self._crossing == "above":
-                            prev_expanded = prev_ratio >= self._thr
+                            prev_in_regime = prev_ratio >= self._thr
                         else:
-                            prev_expanded = prev_ratio <= self._thr
+                            prev_in_regime = prev_ratio <= self._thr
 
-            if self._crossing == "above":
-                now = ratio >= self._thr
-            else:
-                now = ratio <= self._thr
-
-            if not now or prev_expanded:
-                # Not currently in regime, or already was (no crossing)
+            if prev_in_regime is None or prev_in_regime:
+                # Unknown previous state, or already in regime → no proven crossing
                 continue
 
             c = segment[i]
