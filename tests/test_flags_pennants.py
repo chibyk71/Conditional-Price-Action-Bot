@@ -18,6 +18,7 @@ from cpab.detectors.flags_pennants import (
     DEFAULT_POLE_ATR_LOOKBACK,
     DEFAULT_POLE_STRENGTH_MULT,
     DEFAULT_MAX_POLE_RETRACEMENT,
+    DEFAULT_MIN_CONSOLIDATION_BARS,
     DEFAULT_BOUNDARY_TOLERANCE,
     DEFAULT_PARALLEL_SLOPE_TOLERANCE,
     DEFAULT_MAX_BARS_TO_BREAKOUT,
@@ -563,30 +564,80 @@ ALL_CONCEPTS = (
 
 
 def test_strength_threshold_equality():
-    """Pole at exactly threshold should qualify ( >= )."""
-    # Use a controlled ATR and displacement.
-    # Quiet bars with known range ≈ 1.0
-    atr_bars = 16
-    candles = [_c(i, 100, 100.5, 99.5, 100) for i in range(atr_bars)]
-    # Pole of 3 bars, displacement exactly 1.5 * ATR (ATR ~1.0 → 1.5)
-    # After quiet, ATR ≈ 1.0
-    candles.append(_c(atr_bars, 100, 101, 99.8, 100.5))
-    candles.append(_c(atr_bars + 1, 100.5, 101.5, 100.3, 101.0))
-    candles.append(_c(atr_bars + 2, 101.0, 102, 100.8, 101.5))  # disp=1.5
-    # Minimal consolidation + breakout not required for this unit-style check;
-    # we just verify the pole iterator would accept via full detect with loose
-    # consolidation settings is hard; instead call _iter_poles.
+    """displacement == pole_strength_mult * ATR must qualify; just below must not."""
+    from cpab.detectors.wilder_atr import atr_before_pole
+
+    lookback = 14
+    # lookback+1 quiet bars so ATR window is fully pre-pole. H-L=1.0, prev close
+    # aligned → true range = 1.0 → Wilder ATR = 1.0 exactly.
+    prefix = [_c(i, 100.0, 100.5, 99.5, 100.0) for i in range(lookback + 1)]
+    # pole will start at index lookback+1; ATR uses prefix only.
+    atr = atr_before_pole(
+        prefix + [_c(lookback + 1, 100, 101, 99, 101)],
+        lookback + 1,
+        lookback=lookback,
+        step=TF,
+    )
+    assert atr is not None and abs(atr - 1.0) < 1e-12
+
+    mult = 1.5
+    threshold = mult * atr
+    pole_start = lookback + 1  # index of first pole bar
+
+    def make_pole(disp: float):
+        # 3-bar pole: close[start]=100, close[end]=100+disp so displacement is exact.
+        start_close = 100.0
+        end_close = start_close + disp
+        bars = list(prefix)
+        # Bar 0 of pole: close stays at start_close so displacement is measured correctly.
+        bars.append(_c(pole_start, start_close, start_close + 0.2, start_close - 0.1, start_close))
+        bars.append(
+            _c(
+                pole_start + 1,
+                start_close,
+                start_close + abs(disp) * 0.5 + 0.1,
+                start_close - 0.1,
+                start_close + disp / 2,
+            )
+        )
+        bars.append(
+            _c(
+                pole_start + 2,
+                start_close + disp / 2,
+                end_close + 0.1,
+                start_close + disp / 2 - 0.1,
+                end_close,
+            )
+        )
+        return bars
+
     det = FlagsPennantsDetector(
         left_strength=1,
         right_strength=1,
-        pole_strength_mult=1.5,
+        pole_strength_mult=mult,
         min_pole_bars=3,
         max_pole_bars=3,
+        pole_atr_lookback=lookback,
     )
-    poles = list(det._iter_poles(candles, step=TF))
-    # May or may not depending on exact ATR; at least no crash and
-    # equality path is exercised when ATR matches.
-    assert isinstance(poles, list)
+
+    # Exact equality: must qualify
+    eq_candles = make_pole(threshold)
+    eq_poles = [
+        p for p in det._iter_poles(eq_candles, step=TF)
+        if p["start_idx"] == pole_start and p["end_idx"] == pole_start + 2
+    ]
+    assert len(eq_poles) == 1, f"expected exact-threshold pole, got {eq_poles}"
+    assert abs(eq_poles[0]["displacement"] - threshold) < 1e-9
+    assert eq_poles[0]["displacement"] >= eq_poles[0]["threshold"] - 1e-12
+
+    # Immediately below threshold: must not qualify
+    below = threshold * 0.999
+    below_candles = make_pole(below)
+    below_poles = [
+        p for p in det._iter_poles(below_candles, step=TF)
+        if p["start_idx"] == pole_start and p["end_idx"] == pole_start + 2
+    ]
+    assert len(below_poles) == 0, f"below-threshold pole must be rejected, got {below_poles}"
 
 
 def test_deterministic_ids():
@@ -602,3 +653,78 @@ def test_deterministic_ids():
     ids1 = sorted(o.id for o in o1 if o.type == CONCEPT_BULLISH_FLAG)
     ids2 = sorted(o.id for o in o2 if o.type == CONCEPT_BULLISH_FLAG)
     assert ids1 == ids2
+
+
+def test_registry_min_history_matches_detector():
+    """Registry metadata min_history must match FlagsPennantsDetector.min_history."""
+    det = FlagsPennantsDetector()
+    # Direct detector property
+    assert det.min_history == (
+        DEFAULT_POLE_ATR_LOOKBACK
+        + 1
+        + DEFAULT_MIN_POLE_BARS
+        + DEFAULT_MIN_CONSOLIDATION_BARS
+        + 1  # left default
+        + 1  # right default
+        + 4
+    )
+    # Registry path (skip if talib missing at import)
+    talib = pytest.importorskip("talib")
+    reg = build_default_registry()
+    info = reg.validate_config("bullish_flag", {})
+    assert info.min_history == det.min_history
+    # Creating detector via registry yields same requirement
+    det2, info2 = reg.create_detector("bullish_flag")
+    assert det2.min_history == info2.min_history == det.min_history
+
+
+def test_no_lookahead_retracement_after_final_anchor():
+    """
+    Retracement qualification must not use candles after the final selected
+    anchor. A deep wick after the final anchor must not change whether an
+    earlier-confirmed candidate qualifies.
+    """
+    # Build a normal bullish flag that confirms.
+    base = _build_bullish_flag(cons_bars=8, breakout=True)
+    det = FlagsPennantsDetector(
+        left_strength=1,
+        right_strength=1,
+        pole_strength_mult=1.0,
+        max_pole_retracement=0.50,
+    )
+    obs_base = [o for o in det.detect(base) if o.type == CONCEPT_BULLISH_FLAG]
+    assert len(obs_base) >= 1
+    confirmed_ids = {o.id for o in obs_base}
+
+    # Append a candle with an extremely deep low *after* the pattern.
+    # If retracement used this future candle, max retracement would exceed 0.50
+    # and the earlier confirmation would be lost (lookahead).
+    last = base[-1]
+    deep = _c(
+        len(base),
+        last.close,
+        last.close + 0.2,
+        50.0,  # deep low far below pole
+        last.close,
+        start=START,
+    )
+    # Fix epoch relative to last
+    deep = Candle(
+        symbol=last.symbol,
+        timeframe=last.timeframe,
+        epoch=last.epoch + TF,
+        open=last.close,
+        high=last.close + 0.2,
+        low=50.0,
+        close=last.close,
+        is_closed=True,
+        source="provider",
+    )
+    extended = base + [deep]
+    obs_ext = [o for o in det.detect(extended) if o.type == CONCEPT_BULLISH_FLAG]
+    ext_ids = {o.id for o in obs_ext}
+    # Previously confirmed observations must still be present (no retrospective
+    # rejection from future deep wick).
+    assert confirmed_ids.issubset(ext_ids), (
+        f"lookahead changed confirmation set: lost {confirmed_ids - ext_ids}"
+    )

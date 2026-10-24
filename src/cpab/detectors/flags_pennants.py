@@ -734,8 +734,21 @@ class FlagsPennantsDetector(PriceActionDetector):
         if concept is None:
             return None
 
-        # Retracement check
-        cons_candles = closed[cons_start : cons_end + 1]
+        # Consolidation end is defined by the selected anchors (no lookahead).
+        # Retracement and qualification use only candles up to the final
+        # selected anchor event. Candles after that point must not influence
+        # whether an earlier breakout qualifies.
+        final_idx = epoch_to_idx[final_event]
+        if final_idx < cons_start:
+            return None
+        # Bound the evaluated consolidation window by the last anchor candle.
+        # cons_end may be larger (used only to discover anchors); qualification
+        # must not see beyond the final anchor.
+        effective_cons_end = final_idx
+        cons_candles = closed[cons_start : effective_cons_end + 1]
+        if len(cons_candles) < self._min_cons:
+            return None
+
         if pole_dir == "bullish":
             lowest = min(c.low for c in cons_candles)
             retr = (pole["end_close"] - lowest) / pole["displacement"]
@@ -746,8 +759,10 @@ class FlagsPennantsDetector(PriceActionDetector):
             return None
 
         all_conf = max(confs)
-        final_idx = epoch_to_idx[final_event]
 
+        # Breakout may only be considered after the consolidation window that
+        # qualified the candidate has fully closed (final anchor candle) and
+        # after all anchors are confirmed.
         eligible = self._candle_after_all_available(
             closed,
             epoch_to_idx,

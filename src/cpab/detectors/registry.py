@@ -659,15 +659,17 @@ class CapabilityRegistry:
                     "right_strength": right,
                     "tie_policy": policy,
                 }
+                # Align with FlagsPennantsDetector.min_history: use *min*
+                # pole/consolidation durations. max_bars_to_breakout is a
+                # waiting window, not required history before detection can start.
                 mh = (
                     int(merged["pole_atr_lookback"])
                     + 1
-                    + int(merged["max_pole_bars"])
-                    + int(merged["max_consolidation_bars"])
-                    + int(merged["max_bars_to_breakout"])
+                    + int(merged["min_pole_bars"])
+                    + int(merged["min_consolidation_bars"])
                     + left
                     + right
-                    + 2
+                    + 4
                 )
             else:
                 mh = entry["min_history"]
@@ -1274,7 +1276,7 @@ def build_default_registry() -> CapabilityRegistry:
             "right_strength",
             "tie_policy",
         ],
-        min_history=50,
+        min_history=26,
         implementation="flags_pennants",
     )
 
