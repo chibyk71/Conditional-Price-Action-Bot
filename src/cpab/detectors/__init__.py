@@ -23,6 +23,11 @@ from cpab.detectors.order_block import OrderBlockDetector
 from cpab.detectors.breaker_block import BreakerBlockDetector
 from cpab.detectors.mitigation_block import MitigationBlockDetector
 from cpab.detectors.flags_pennants import FlagsPennantsDetector
+from cpab.detectors.behavior_volatility import (
+    ATRExpansionDetector,
+    ATRContractionDetector,
+    RangeExpansionDetector,
+)
 
 __all__ = [
     "PriceActionDetector",
@@ -43,6 +48,9 @@ __all__ = [
     "BreakerBlockDetector",
     "MitigationBlockDetector",
     "FlagsPennantsDetector",
+    "ATRExpansionDetector",
+    "ATRContractionDetector",
+    "RangeExpansionDetector",
     "evaluate_raw",
     "AdapterOutcomeKind",
     "CapabilityRegistry",
