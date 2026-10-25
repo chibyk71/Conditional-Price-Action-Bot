@@ -26,7 +26,7 @@ def test_bullish_bearish_direction_and_boundary_equality():
     p = bull[0].payload
     assert p["body_atr_ratio"] == pytest.approx(1.0)
     assert p["true_range_atr_ratio"] == pytest.approx(1.5)
-    boundary = series(lambda i: c(i,100,100+10/3,100,102))
+    boundary = [c(i,100,101.5,98.5,100) for i in range(15)] + [c(15,100,105,100,103)]
     obs = det.detect_all_historical(boundary)
     assert len(obs) == 1
     assert obs[0].payload["body_range_ratio"] == pytest.approx(0.60)
