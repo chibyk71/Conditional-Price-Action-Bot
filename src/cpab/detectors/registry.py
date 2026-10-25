@@ -1374,4 +1374,42 @@ def build_default_registry() -> CapabilityRegistry:
         implementation="behavior_volatility",
     )
 
+
+    from cpab.detectors.behavior_volatility import (
+        IMPULSE_BODY_ATR_MIN,
+        IMPULSE_TRUE_RANGE_ATR_MIN,
+        IMPULSE_BODY_RANGE_MIN,
+        VARIANT_ATR_NORMALIZED_CANDLE,
+        MIN_HISTORY_IMPULSE,
+    )
+
+    def _impulse_factory(
+        cfg: Optional[dict[str, Any]] = None,
+    ) -> PriceActionDetector:
+        from cpab.detectors.behavior_volatility import ImpulseDetector
+
+        return ImpulseDetector(detector_id="impulse")
+
+    reg.register(
+        "impulse",
+        concepts=["impulse", "bullish_impulse", "bearish_impulse"],
+        factory=_impulse_factory,
+        config={
+            "atr_period": ATR_PERIOD,
+            "body_atr_min": IMPULSE_BODY_ATR_MIN,
+            "true_range_atr_min": IMPULSE_TRUE_RANGE_ATR_MIN,
+            "body_range_min": IMPULSE_BODY_RANGE_MIN,
+            "variant": VARIANT_ATR_NORMALIZED_CANDLE,
+        },
+        accepted_params=[
+            "atr_period",
+            "body_atr_min",
+            "true_range_atr_min",
+            "body_range_min",
+            "variant",
+        ],
+        min_history=MIN_HISTORY_IMPULSE,
+        implementation="behavior_volatility",
+    )
+
     return reg
