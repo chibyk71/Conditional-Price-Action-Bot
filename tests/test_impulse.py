@@ -31,6 +31,14 @@ def test_bullish_bearish_direction_and_boundary_equality():
     assert len(obs) == 1
     assert obs[0].payload["body_range_ratio"] == pytest.approx(0.60)
 
+def test_emits_each_qualifying_completed_candle_not_crossing_only():
+    bars = [c(i,100,101,99,100) for i in range(15)]
+    bars.append(c(15,100,103,100,102))
+    bars.append(c(16,100,103.5,100,102.5))
+    obs = ImpulseDetector().detect_all_historical(bars)
+    assert [o.event_time for o in obs] == [bars[15].epoch, bars[16].epoch]
+
+
 @pytest.mark.parametrize("candidate", [
     lambda i: c(i,100,103,100,101.99),
     lambda i: c(i,100,102.999,100,102),
