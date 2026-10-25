@@ -159,6 +159,30 @@ class PullbackDetector(PriceActionDetector):
         else:
             self._detector_config_id = _deterministic_config_id(self._config)
 
+        # Logical sub-variant config identities (shared swing params; variant-specific).
+        # Observations embed the effective sub-variant config id so that variant="all"
+        # produces the same observation identities as dedicated impulse_based /
+        # structure_based detectors. Detector-level detector_config_id remains
+        # distinct when variant="all".
+        base_params = {
+            "left_strength": self._left,
+            "right_strength": self._right,
+            "tie_policy": self._tie_policy,
+        }
+        self._variant_config_ids: dict[str, str] = {
+            "structure_based": _deterministic_config_id(
+                {**base_params, "variant": "structure_based"}
+            ),
+            "impulse_based": _deterministic_config_id(
+                {**base_params, "variant": "impulse_based"}
+            ),
+        }
+        # When constructed for a single logical variant, keep observation config
+        # identity aligned with the detector's own config id (including any
+        # explicit detector_config_id override).
+        if self._variant in ("structure_based", "impulse_based"):
+            self._variant_config_ids[self._variant] = self._detector_config_id
+
         # Internal composed detectors for reconstruction
         self._swing = SwingPivotDetector(
             left_strength=self._left,
@@ -258,6 +282,14 @@ class PullbackDetector(PriceActionDetector):
         )
         return out
 
+    def _config_id_for_variant(self, variant: str) -> str:
+        """Return the deterministic config id for a logical sub-variant.
+
+        Ensures observations from variant='all' share identity with those from
+        a dedicated detector for the same logical configuration.
+        """
+        return self._variant_config_ids.get(variant, self._detector_config_id)
+
     def _make_observation(
         self,
         *,
@@ -273,6 +305,8 @@ class PullbackDetector(PriceActionDetector):
         event_time = candle.epoch
         confirmed_at = candle.epoch
         candle_epoch = candle.epoch
+        # Use effective sub-variant config identity so all/dedicated match.
+        cfg_id = self._config_id_for_variant(variant)
 
         oid = _stable_pullback_id(
             symbol=candle.symbol,
@@ -281,7 +315,7 @@ class PullbackDetector(PriceActionDetector):
             event_time=event_time,
             confirmed_at=confirmed_at,
             detector_id=self._detector_id,
-            detector_config_id=self._detector_config_id,
+            detector_config_id=cfg_id,
             direction=direction,
             variant=variant,
             source_id=source_id,
@@ -299,7 +333,7 @@ class PullbackDetector(PriceActionDetector):
             direction=direction,
             variant=variant,
             detector_id=self._detector_id,
-            detector_config_id=self._detector_config_id,
+            detector_config_id=cfg_id,
             reference_ids=reference_ids,
             lifecycle_state=lifecycle_state,
             payload=payload,
