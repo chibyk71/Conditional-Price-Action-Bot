@@ -87,15 +87,15 @@ class ConditionEvaluator:
             min_count = int(req.get("min_count", 1))
             allow_developing = bool(req.get("allow_developing", False))
 
+            # Strict type matching: type filters only observation.type.
+            # Variant filters only when explicitly specified. No type↔variant
+            # fallback (avoids e.g. type="hh" matching variant="hh" on another type).
             candidates = [
                 o
                 for o in obs_list
-                if (
-                    req_type is None
-                    or o.type == req_type
-                    or (req_variant is None and o.variant == req_type)
-                )
+                if (req_type is None or o.type == req_type)
                 and (req_variant is None or o.variant == req_variant)
+                and (req_type is not None or req_variant is not None)
             ]
             if T is not None:
                 matches = [
