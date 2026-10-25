@@ -70,6 +70,9 @@ Phase 6B: impulse — body/preceding ATR ≥ 1.0, TR/preceding ATR ≥ 1.5,
 body/range ≥ 0.60; emits bullish/bearish observations for every qualifying bar.
 Warm-up 35 / 35 / 16 / 16. Variants rolling_atr_v1, true_range_v1, and
 atr_normalized_candle_v1. No lifecycle.
+
+Phase 6C: pullback — detector_id pullback, variants structure_based and impulse_based;
+tracks pullback start, continuation, and termination (trend_resumption, structural_failure, invalidation).
 """
 
 from __future__ import annotations
@@ -679,6 +682,44 @@ class CapabilityRegistry:
                     + right
                     + 4
                 )
+            elif impl == "pullback":
+                from cpab.detectors.swing import _validate_strength, _validate_tie_policy
+                from cpab.detectors.pullback import ALLOWED_VARIANTS
+
+                defaults = {
+                    "variant": "structure_based",
+                    "left_strength": 1,
+                    "right_strength": 1,
+                    "tie_policy": "strict",
+                }
+                merged = dict(defaults)
+                if concept in ("structure_based", "structure_based_pullback", "pullback:structure_based"):
+                    merged["variant"] = "structure_based"
+                elif concept in ("impulse_based", "impulse_based_pullback", "pullback:impulse_based"):
+                    merged["variant"] = "impulse_based"
+                merged.update(effective)
+                if accepted is not None:
+                    for key, val in config.items():
+                        if key in accepted:
+                            merged[key] = val
+                var = merged.get("variant", "structure_based")
+                if var not in ALLOWED_VARIANTS:
+                    raise ValueError(f"variant must be one of {sorted(ALLOWED_VARIANTS)}, got {var!r}")
+                left = _validate_strength("left_strength", merged.get("left_strength", 1))
+                right = _validate_strength("right_strength", merged.get("right_strength", 1))
+                policy = _validate_tie_policy(merged.get("tie_policy", "strict"))
+                effective = {
+                    "variant": var,
+                    "left_strength": left,
+                    "right_strength": right,
+                    "tie_policy": policy,
+                }
+                if var == "impulse_based":
+                    mh = 17
+                elif var == "structure_based":
+                    mh = left + 2 * right + 3
+                else:
+                    mh = min(17, left + 2 * right + 3)
             else:
                 mh = entry["min_history"]
                 if mh is None and entry.get("pattern"):
@@ -1413,6 +1454,43 @@ def build_default_registry() -> CapabilityRegistry:
         ],
         min_history=MIN_HISTORY_IMPULSE,
         implementation="behavior_volatility",
+    )
+
+    def _pullback_factory(
+        cfg: Optional[dict[str, Any]] = None,
+    ) -> PriceActionDetector:
+        from cpab.detectors.pullback import PullbackDetector
+
+        c = dict(cfg or {})
+        return PullbackDetector(
+            variant=c.get("variant", "structure_based"),
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
+            detector_id="pullback",
+        )
+
+    reg.register(
+        "pullback",
+        concepts=[
+            "pullback",
+            "structure_based",
+            "impulse_based",
+            "structure_based_pullback",
+            "impulse_based_pullback",
+            "pullback:structure_based",
+            "pullback:impulse_based",
+        ],
+        factory=_pullback_factory,
+        config={},
+        accepted_params=[
+            "variant",
+            "left_strength",
+            "right_strength",
+            "tie_policy",
+        ],
+        min_history=6,
+        implementation="pullback",
     )
 
     return reg

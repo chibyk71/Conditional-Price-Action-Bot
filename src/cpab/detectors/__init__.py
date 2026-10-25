@@ -29,6 +29,7 @@ from cpab.detectors.behavior_volatility import (
     RangeExpansionDetector,
     ImpulseDetector,
 )
+from cpab.detectors.pullback import PullbackDetector
 
 __all__ = [
     "PriceActionDetector",
@@ -53,6 +54,7 @@ __all__ = [
     "ATRContractionDetector",
     "RangeExpansionDetector",
     "ImpulseDetector",
+    "PullbackDetector",
     "evaluate_raw",
     "AdapterOutcomeKind",
     "CapabilityRegistry",
