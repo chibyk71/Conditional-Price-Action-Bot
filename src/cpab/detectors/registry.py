@@ -62,6 +62,11 @@ max retracement), consolidation (min/max bars), boundary_tolerance,
 parallel_slope_tolerance, max_bars_to_breakout, plus left/right_strength
 and tie_policy. Emits bullish_flag, bearish_flag, bullish_pennant,
 bearish_pennant.
+
+Phase 6A: atr_expansion, atr_contraction, range_expansion — locked ATR period 14,
+baseline mean of preceding 20 rolling ATRs; expansion 1.25× / contraction 0.75×
+crossing-only; range expansion TR ≥ 1.5× preceding ATR (every qualifying bar).
+Warm-up 35 / 35 / 16. Variants rolling_atr_v1 and true_range_v1. Direction None.
 """
 
 from __future__ import annotations
@@ -1278,6 +1283,95 @@ def build_default_registry() -> CapabilityRegistry:
         ],
         min_history=26,
         implementation="flags_pennants",
+    )
+
+    from cpab.detectors.behavior_volatility import (
+        ATR_PERIOD,
+        BASELINE_WINDOW,
+        EXPANSION_MULT,
+        CONTRACTION_MULT,
+        RANGE_EXPANSION_MULT,
+        VARIANT_ROLLING_ATR,
+        VARIANT_TRUE_RANGE,
+    )
+
+    def _atr_expansion_factory(
+        cfg: Optional[dict[str, Any]] = None,
+    ) -> PriceActionDetector:
+        from cpab.detectors.behavior_volatility import ATRExpansionDetector
+
+        return ATRExpansionDetector(detector_id="atr_expansion")
+
+    reg.register(
+        "atr_expansion",
+        concepts=["atr_expansion"],
+        factory=_atr_expansion_factory,
+        config={
+            "atr_period": ATR_PERIOD,
+            "baseline_window": BASELINE_WINDOW,
+            "crossing": "above",
+            "threshold": EXPANSION_MULT,
+            "variant": VARIANT_ROLLING_ATR,
+        },
+        accepted_params=[
+            "atr_period",
+            "baseline_window",
+            "crossing",
+            "threshold",
+            "variant",
+        ],
+        min_history=35,
+        implementation="behavior_volatility",
+    )
+
+    def _atr_contraction_factory(
+        cfg: Optional[dict[str, Any]] = None,
+    ) -> PriceActionDetector:
+        from cpab.detectors.behavior_volatility import ATRContractionDetector
+
+        return ATRContractionDetector(detector_id="atr_contraction")
+
+    reg.register(
+        "atr_contraction",
+        concepts=["atr_contraction"],
+        factory=_atr_contraction_factory,
+        config={
+            "atr_period": ATR_PERIOD,
+            "baseline_window": BASELINE_WINDOW,
+            "crossing": "below",
+            "threshold": CONTRACTION_MULT,
+            "variant": VARIANT_ROLLING_ATR,
+        },
+        accepted_params=[
+            "atr_period",
+            "baseline_window",
+            "crossing",
+            "threshold",
+            "variant",
+        ],
+        min_history=35,
+        implementation="behavior_volatility",
+    )
+
+    def _range_expansion_factory(
+        cfg: Optional[dict[str, Any]] = None,
+    ) -> PriceActionDetector:
+        from cpab.detectors.behavior_volatility import RangeExpansionDetector
+
+        return RangeExpansionDetector(detector_id="range_expansion")
+
+    reg.register(
+        "range_expansion",
+        concepts=["range_expansion"],
+        factory=_range_expansion_factory,
+        config={
+            "atr_period": ATR_PERIOD,
+            "threshold": RANGE_EXPANSION_MULT,
+            "variant": VARIANT_TRUE_RANGE,
+        },
+        accepted_params=["atr_period", "threshold", "variant"],
+        min_history=16,
+        implementation="behavior_volatility",
     )
 
     return reg
