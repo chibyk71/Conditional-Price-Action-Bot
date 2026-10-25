@@ -53,7 +53,7 @@ def test_warmup_closed_only_and_unsupported_timeframe():
     assert det.detect_all_historical(bars[:-1]) == []
     open_bars = series(lambda i:c(i,100,103,100,102,closed=False))
     assert det.detect_all_historical(open_bars) == []
-    assert det.detect_all_historical(series(timeframe="unknown")) == []
+    assert det.detect_all_historical(series(lambda i: c(i,100,103,100,102,timeframe="unknown"), timeframe="unknown")) == []
 
 def test_future_candle_does_not_change_candidate_atr_or_identity():
     bars = series()
@@ -104,3 +104,5 @@ def test_observation_identity_timing_and_registry_config():
     created, info = registry.create_detector("impulse")
     assert created.detector_config_id == info.detector_config_id == det.detector_config_id
     assert created.min_history == info.min_history == 16
+    with pytest.raises(ValueError, match="cannot override fixed parameter"):
+        registry.create_detector("impulse", config={"body_atr_min": 2.0})
