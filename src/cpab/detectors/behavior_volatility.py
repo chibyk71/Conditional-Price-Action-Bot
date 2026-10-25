@@ -1,7 +1,7 @@
 """
-Phase 6A — Behavioral / volatility regime detectors.
+Phase 6A/6B — Behavioral, volatility, and impulse detectors.
 
-Exactly three detectors:
+Phase 6A detectors:
 
   - atr_expansion   (variant: rolling_atr_v1)
   - atr_contraction (variant: rolling_atr_v1)
@@ -17,8 +17,9 @@ Expansion threshold: 1.25× baseline, crossing-only.
 Contraction threshold: 0.75× baseline, crossing-only.
 Range expansion: current true range ≥ 1.5× the preceding ATR; emit for every
   qualifying completed candle (not crossing-only).
-Warm-up: 35 bars for ATR regimes; 16 bars for range expansion.
-Direction: None for all three.
+Warm-up: 35 bars for ATR regimes; 16 bars for range expansion and impulse.
+Impulse: body/preceding ATR ≥ 1.0, true range/preceding ATR ≥ 1.5, and
+body/range ≥ 0.60. Direction follows open/close; flat candles do not emit.
 Strict continuous-segment isolation; no gap bridging.
 No lifecycle, trading signals, volume logic, or TA-Lib dependency.
 """
