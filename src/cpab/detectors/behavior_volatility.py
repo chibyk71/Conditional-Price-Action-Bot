@@ -34,6 +34,7 @@ from typing import Any, Optional, Sequence
 from cpab.detectors.base import PriceActionDetector
 from cpab.detectors.swing import timeframe_seconds
 from cpab.detectors.wilder_atr import true_range, wilder_atr, _valid_ohlc, _finite
+from cpab.candle_geometry import candle_range, real_body, candle_direction, body_ratio
 from cpab.models import Candle, Observation
 
 logger = logging.getLogger(__name__)
