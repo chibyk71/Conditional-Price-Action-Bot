@@ -66,7 +66,10 @@ bearish_pennant.
 Phase 6A: atr_expansion, atr_contraction, range_expansion — locked ATR period 14,
 baseline mean of preceding 20 rolling ATRs; expansion 1.25× / contraction 0.75×
 crossing-only; range expansion TR ≥ 1.5× preceding ATR (every qualifying bar).
-Warm-up 35 / 35 / 16. Variants rolling_atr_v1 and true_range_v1. Direction None.
+Phase 6B: impulse — body/preceding ATR ≥ 1.0, TR/preceding ATR ≥ 1.5,
+body/range ≥ 0.60; emits bullish/bearish observations for every qualifying bar.
+Warm-up 35 / 35 / 16 / 16. Variants rolling_atr_v1, true_range_v1, and
+atr_normalized_candle_v1. No lifecycle.
 """
 
 from __future__ import annotations
