@@ -380,10 +380,15 @@ class PullbackDetector(PriceActionDetector):
                 cur = closed[j]
                 prev = closed[j - 1]
 
-                # Continuity check
+                # Hard segment boundary: gap or invalid OHLC ends any pending/active
+                # lifecycle for this source. Do not bridge across broken data.
                 if cur.epoch - prev.epoch != step:
+                    if lifecycle_status in ("pending", "active"):
+                        lifecycle_status = "terminated"
                     continue
                 if not _ohlc_sane(cur):
+                    if lifecycle_status in ("pending", "active"):
+                        lifecycle_status = "terminated"
                     continue
 
                 # Start evaluation
@@ -538,10 +543,15 @@ class PullbackDetector(PriceActionDetector):
                 cur = closed[j]
                 prev = closed[j - 1]
 
-                # Continuity check
+                # Hard segment boundary: gap or invalid OHLC ends any pending/active
+                # lifecycle for this source. Do not bridge across broken data.
                 if cur.epoch - prev.epoch != step:
+                    if lifecycle_status in ("pending", "active"):
+                        lifecycle_status = "terminated"
                     continue
                 if not _ohlc_sane(cur):
+                    if lifecycle_status in ("pending", "active"):
+                        lifecycle_status = "terminated"
                     continue
 
                 # Confirmed swings available strictly before or at candidate candle's close
@@ -623,7 +633,6 @@ class PullbackDetector(PriceActionDetector):
                         structure_moves=structure_moves,
                         swing_by_id=swing_by_id,
                         eval_epoch=cur.epoch,
-                        move_event_time=move.event_time or 0,
                     )
 
                     is_failure = False
@@ -720,12 +729,13 @@ class PullbackDetector(PriceActionDetector):
         structure_moves: list[Observation],
         swing_by_id: dict[str, Observation],
         eval_epoch: int,
-        move_event_time: int,
     ) -> Optional[Observation]:
         """
-        Identify the latest confirmed protective swing:
+        Identify the latest confirmed protective swing available at evaluation:
           - Bullish: most recent confirmed higher low (HL).
           - Bearish: most recent confirmed lower high (LH).
+        Eligibility is causal on confirmation only (confirmed_at <= eval_epoch).
+        Swings formed after the originating move may qualify once confirmed.
         If ambiguous or missing, returns None.
         """
         target_variant = "hl" if direction == "bullish" else "lh"
@@ -735,12 +745,11 @@ class PullbackDetector(PriceActionDetector):
             if m.variant == target_variant
             and m.confirmed_at is not None
             and m.confirmed_at <= eval_epoch
-            and (m.event_time is None or m.event_time <= move_event_time)
         ]
         if not eligible_moves:
             return None
 
-        # Sort by event_time, then confirmed_at
+        # Latest by event_time, then confirmed_at (most recent protective structure)
         eligible_moves.sort(
             key=lambda m: (
                 m.event_time if m.event_time is not None else 0,

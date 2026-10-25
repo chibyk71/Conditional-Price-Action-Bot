@@ -873,6 +873,46 @@ class TestDataIntegrity:
         for s in starts:
             assert s.candle_epoch != gap_epoch, "Gapped candle should not start pullback"
 
+    def test_gap_is_hard_segment_boundary_no_start_after(self):
+        """
+        Gap is a hard segment boundary: a valid against-candle after a gap must
+        not start a pullback for the pre-gap impulse source.
+        """
+        bars = impulse_series_bullish()
+        # Gap after impulse (i=15), then a continuous post-gap bar that would
+        # otherwise qualify as start (close < open against bullish impulse).
+        gap_epoch = START + 16 * TF + 5 * TF
+        bars.append(Candle("PB_100", "1m", gap_epoch, 102, 102.5, 100.5, 101, True))
+        bars.append(Candle("PB_100", "1m", gap_epoch + TF, 101, 101.5, 100, 100.5, True))
+        det = PullbackDetector(variant="impulse_based")
+        obs = det.detect_all_historical(bars)
+        starts = [o for o in obs if o.payload.get("lifecycle_event") == "start"]
+        assert starts == [], (
+            "Must not start pullback after a gap for the pre-gap impulse source"
+        )
+
+    def test_gap_during_active_lifecycle_stops_tracking(self):
+        """
+        Once a pullback has started, a subsequent gap abandons the active
+        lifecycle; post-gap bars must not emit termination for that source.
+        """
+        bars = impulse_series_bullish()
+        # Contiguous start: close against bullish impulse
+        bars.append(c(16, 102, 102.5, 100.5, 101, symbol="PB_100", timeframe="1m"))
+        # Gap, then a bar that would be invalidation (close < impulse low 100)
+        gap_epoch = START + 17 * TF + 5 * TF
+        bars.append(Candle("PB_100", "1m", gap_epoch, 101, 101.5, 98, 99, True))
+        det = PullbackDetector(variant="impulse_based")
+        obs = det.detect_all_historical(bars)
+        starts = [o for o in obs if o.payload.get("lifecycle_event") == "start"]
+        terms = [
+            o
+            for o in obs
+            if o.payload.get("lifecycle_event") in ("invalidation", "trend_resumption")
+        ]
+        assert len(starts) >= 1
+        assert terms == [], "Must not terminate a lifecycle across a gap"
+
     def test_invalid_ohlc_candle_skipped(self):
         """Candle with high < low (malformed) must be skipped."""
         bars = impulse_series_bullish()
@@ -884,6 +924,23 @@ class TestDataIntegrity:
         # Malformed candle should not trigger a start
         for s in starts:
             assert s.candle_epoch != START + 16 * TF
+
+    def test_invalid_ohlc_is_hard_segment_boundary(self):
+        """
+        Invalid OHLC is a hard segment boundary: a later valid against-candle
+        must not start a pullback for the same impulse source.
+        """
+        bars = impulse_series_bullish()
+        # Invalid candle at i=16 (high < low)
+        bars.append(Candle("PB_100", "1m", START + 16 * TF, 102, 100, 103, 101, True))
+        # Contiguous next bar that would otherwise start (against bullish impulse)
+        bars.append(c(17, 101, 101.5, 100, 100.5, symbol="PB_100", timeframe="1m"))
+        det = PullbackDetector(variant="impulse_based")
+        obs = det.detect_all_historical(bars)
+        starts = [o for o in obs if o.payload.get("lifecycle_event") == "start"]
+        assert starts == [], (
+            "Must not start pullback after an invalid OHLC for the same source"
+        )
 
     def test_open_candles_ignored(self):
         """Forming (not closed) candles must not be evaluated."""
@@ -1102,3 +1159,227 @@ class TestEdgeCases:
             assert "start_swing_id" in s.payload
             # reference_ids should contain both originating move and start swing
             assert s.payload["originating_move_id"] in s.reference_ids
+
+
+# ===========================================================================
+# Protective swing: later confirmed HL/LH must be eligible
+# ===========================================================================
+
+class TestProtectiveSwingSelection:
+
+    def test_later_confirmed_protective_swing_is_selected(self):
+        """
+        A protective HL that forms after the originating move and is confirmed
+        before the evaluation candle must be selectable (not excluded by
+        move event_time ceiling).
+        """
+        det = PullbackDetector(variant="structure_based")
+        # Synthetic swings and structure moves
+        early_swing = Observation.create(
+            type="swing_low",
+            symbol="PB_100",
+            timeframe="1m",
+            candle_epoch=START + 2 * TF,
+            event_time=START + 2 * TF,
+            confirmed_at=START + 3 * TF,
+            direction="bearish",
+            variant="swing_low",
+            detector_id="swing_pivot",
+            reference_ids=(),
+            payload={"price": 95.0},
+            id="swing_early",
+        )
+        later_swing = Observation.create(
+            type="swing_low",
+            symbol="PB_100",
+            timeframe="1m",
+            candle_epoch=START + 8 * TF,
+            event_time=START + 8 * TF,
+            confirmed_at=START + 9 * TF,
+            direction="bearish",
+            variant="swing_low",
+            detector_id="swing_pivot",
+            reference_ids=(),
+            payload={"price": 97.0},
+            id="swing_later",
+        )
+        move_event_time = START + 4 * TF
+        early_hl = Observation.create(
+            type="market_structure",
+            symbol="PB_100",
+            timeframe="1m",
+            candle_epoch=START + 3 * TF,
+            event_time=START + 2 * TF,
+            confirmed_at=START + 3 * TF,
+            direction="bullish",
+            variant="hl",
+            detector_id="market_structure",
+            reference_ids=("swing_early",),
+            payload={},
+            id="hl_early",
+        )
+        # HL whose event_time is AFTER the originating move event_time
+        later_hl = Observation.create(
+            type="market_structure",
+            symbol="PB_100",
+            timeframe="1m",
+            candle_epoch=START + 9 * TF,
+            event_time=START + 8 * TF,
+            confirmed_at=START + 9 * TF,
+            direction="bullish",
+            variant="hl",
+            detector_id="market_structure",
+            reference_ids=("swing_later",),
+            payload={},
+            id="hl_later",
+        )
+        assert later_hl.event_time > move_event_time
+
+        eval_epoch = START + 10 * TF
+        swing_by_id = {"swing_early": early_swing, "swing_later": later_swing}
+        result = det._find_protective_swing(
+            direction="bullish",
+            structure_moves=[early_hl, later_hl],
+            swing_by_id=swing_by_id,
+            eval_epoch=eval_epoch,
+        )
+        assert result is not None
+        assert result.id == "swing_later"
+        assert float(result.payload["price"]) == 97.0
+
+    def test_protective_swing_not_confirmed_yet_is_excluded(self):
+        """Protective HL confirmed after eval_epoch must not be used (causality)."""
+        det = PullbackDetector(variant="structure_based")
+        swing = Observation.create(
+            type="swing_low",
+            symbol="PB_100",
+            timeframe="1m",
+            candle_epoch=START + 8 * TF,
+            event_time=START + 8 * TF,
+            confirmed_at=START + 12 * TF,
+            direction="bearish",
+            variant="swing_low",
+            detector_id="swing_pivot",
+            reference_ids=(),
+            payload={"price": 97.0},
+            id="swing_future",
+        )
+        hl = Observation.create(
+            type="market_structure",
+            symbol="PB_100",
+            timeframe="1m",
+            candle_epoch=START + 12 * TF,
+            event_time=START + 8 * TF,
+            confirmed_at=START + 12 * TF,
+            direction="bullish",
+            variant="hl",
+            detector_id="market_structure",
+            reference_ids=("swing_future",),
+            payload={},
+            id="hl_future",
+        )
+        result = det._find_protective_swing(
+            direction="bullish",
+            structure_moves=[hl],
+            swing_by_id={"swing_future": swing},
+            eval_epoch=START + 10 * TF,  # before confirmed_at
+        )
+        assert result is None
+
+
+# ===========================================================================
+# Condition evaluator: strict type / explicit variant matching
+# ===========================================================================
+
+class TestConditionEvaluatorTypeVariantMatching:
+
+    def test_type_requirement_does_not_match_variant_only(self):
+        """{"type": "hh"} must not match an observation whose type differs but variant is hh."""
+        from cpab.conditions.evaluator import ConditionEvaluator
+        from cpab.models import ConditionDef
+
+        obs = Observation.create(
+            type="market_structure",
+            symbol="S",
+            timeframe="1m",
+            candle_epoch=100,
+            event_time=100,
+            confirmed_at=100,
+            variant="hh",
+            direction="bullish",
+            detector_id="market_structure",
+            id="ms_hh_1",
+        )
+        cond = ConditionDef(
+            id="c1",
+            symbol="S",
+            timeframe="1m",
+            require_observations=[{"type": "hh", "min_count": 1}],
+        )
+        ev = ConditionEvaluator()
+        result = ev.evaluate(cond, [obs], candle_epoch=100)
+        assert result.met is False
+
+    def test_explicit_variant_requirement_matches(self):
+        """{"variant": "hh"} matches observation.variant without requiring type."""
+        from cpab.conditions.evaluator import ConditionEvaluator
+        from cpab.models import ConditionDef
+
+        obs = Observation.create(
+            type="market_structure",
+            symbol="S",
+            timeframe="1m",
+            candle_epoch=100,
+            event_time=100,
+            confirmed_at=100,
+            variant="hh",
+            direction="bullish",
+            detector_id="market_structure",
+            id="ms_hh_2",
+        )
+        cond = ConditionDef(
+            id="c2",
+            symbol="S",
+            timeframe="1m",
+            require_observations=[{"variant": "hh", "min_count": 1}],
+        )
+        ev = ConditionEvaluator()
+        result = ev.evaluate(cond, [obs], candle_epoch=100)
+        assert result.met is True
+
+    def test_type_and_variant_both_required_when_specified(self):
+        """Both type and variant filters apply when both are set."""
+        from cpab.conditions.evaluator import ConditionEvaluator
+        from cpab.models import ConditionDef
+
+        obs = Observation.create(
+            type="pullback",
+            symbol="S",
+            timeframe="1m",
+            candle_epoch=100,
+            event_time=100,
+            confirmed_at=100,
+            variant="impulse_based",
+            direction="bullish",
+            detector_id="pullback",
+            id="pb_1",
+        )
+        cond_ok = ConditionDef(
+            id="c3",
+            symbol="S",
+            timeframe="1m",
+            require_observations=[
+                {"type": "pullback", "variant": "impulse_based", "min_count": 1}
+            ],
+        )
+        cond_bad = ConditionDef(
+            id="c4",
+            symbol="S",
+            timeframe="1m",
+            require_observations=[
+                {"type": "pullback", "variant": "structure_based", "min_count": 1}
+            ],
+        )
+        ev = ConditionEvaluator()
+        assert ev.evaluate(cond_ok, [obs], candle_epoch=100).met is True
+        assert ev.evaluate(cond_bad, [obs], candle_epoch=100).met is False
