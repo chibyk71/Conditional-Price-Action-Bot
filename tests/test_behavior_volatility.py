@@ -533,47 +533,60 @@ def test_genuine_crossing_emits_once():
 
 def test_unavailable_previous_ratio_not_treated_as_crossing():
     """
-    Invalid OHLC that nullifies the previous ATR makes previous regime
-    unknown. Current bar beyond threshold must not emit.
+    Current ratio qualifies while previous ratio is unavailable → no emit.
+
+    Corrupts a candle that sits only in the ATR window for index (cross-21),
+    so baseline mean for the previous bar fails while the current bar's ATR
+    and baseline remain valid and above the expansion threshold.
     """
-    n = 60
+    n = 65
     candles: list[Candle] = []
     for i in range(n):
-        # Elevate vol late so ratio can exceed threshold
-        hr = 1.0 if i < 45 else 5.0
+        hr = 1.0 if i < 45 else 8.0
         mid = 100.0
         candles.append(_c(i, mid, mid + hr, mid - hr, mid))
     det = ATRExpansionDetector()
-    # Find a bar that would otherwise be a crossing candidate after vol step
     baseline_obs = det.detect_all_historical(candles)
-    if not baseline_obs:
-        # Force a clearer step if synthetic series failed to cross
-        candles = []
-        for i in range(n):
-            hr = 1.0 if i < 40 else 8.0
-            mid = 100.0
-            candles.append(_c(i, mid, mid + hr, mid - hr, mid))
-        baseline_obs = det.detect_all_historical(candles)
-    assert len(baseline_obs) >= 1
+    assert len(baseline_obs) >= 1, "fixture must produce a genuine expansion first"
     cross_epoch = baseline_obs[0].event_time
     cross_idx = next(i for i, c in enumerate(candles) if c.epoch == cross_epoch)
-    # Corrupt the bar immediately before the crossing so prev ATR is None
-    bad_i = cross_idx - 1
-    assert bad_i >= 0
+    # Candle unique to ATR[cross_idx - 21] window (not in ATR[cross_idx - 20 .. cross_idx])
+    bad_i = cross_idx - 35
+    assert bad_i >= 0, f"cross_idx {cross_idx} too early to isolate prev baseline"
     bad = candles[bad_i]
     candles[bad_i] = Candle(
         symbol=bad.symbol,
         timeframe=bad.timeframe,
         epoch=bad.epoch,
         open=100.0,
-        high=90.0,  # high < low → invalid
+        high=90.0,  # high < low → invalid OHLC
         low=110.0,
         close=100.0,
         is_closed=True,
         source=bad.source,
     )
+
+    # Establish the intended condition explicitly via helpers
+    atrs = _rolling_atr_series(candles, period=ATR_PERIOD, step=TF)
+    cur = atrs[cross_idx]
+    cur_base = _baseline_mean(atrs, cross_idx, window=BASELINE_WINDOW)
+    assert cur is not None and cur_base is not None and cur_base > 0
+    cur_ratio = cur / cur_base
+    assert cur_ratio >= EXPANSION_MULT, (
+        f"current ratio must still qualify: {cur_ratio}"
+    )
+    prev_atr = atrs[cross_idx - 1]
+    prev_base = _baseline_mean(atrs, cross_idx - 1, window=BASELINE_WINDOW)
+    prev_unavailable = (
+        prev_atr is None
+        or prev_base is None
+        or (prev_base is not None and prev_base <= 0)
+    )
+    assert prev_unavailable, (
+        f"previous ratio must be unavailable (prev_atr={prev_atr}, prev_base={prev_base})"
+    )
+
     obs = det.detect_all_historical(candles)
-    # The original crossing bar must not emit (prev state unknown)
     at_cross = [o for o in obs if o.event_time == cross_epoch]
     assert at_cross == [], (
         f"emitted despite unknown previous ratio: {[o.payload for o in at_cross]}"
@@ -581,22 +594,41 @@ def test_unavailable_previous_ratio_not_treated_as_crossing():
 
 
 def test_contraction_first_evaluable_not_emitted():
-    """Symmetric check for atr_contraction at first evaluable index."""
+    """
+    First evaluable contraction ratio is at/below 0.75, previous is unavailable
+    (prev_i < start_i), so no observation may be emitted.
+    """
     n = 50
-    # High vol throughout so first evaluable ratio is already contracted? 
-    # Actually for contraction we need ratio <= 0.75 at first evaluable with
-    # unknown prev → still no emit.
-    # Build: very high early ranges then collapse at index 34.
+    # High vol through bar 19, then sustained low vol so ATR[34] has decayed
+    # while mean(ATR[14:34]) remains elevated → ratio << 0.75.
     candles: list[Candle] = []
     for i in range(n):
-        hr = 5.0 if i < 34 else 0.3
+        hr = 5.0 if i < 20 else 0.15
         mid = 100.0
         candles.append(_c(i, mid, mid + hr, mid - hr, mid))
+
+    atrs = _rolling_atr_series(candles, period=ATR_PERIOD, step=TF)
+    i = 34  # first evaluable index
+    cur = atrs[i]
+    base = _baseline_mean(atrs, i, window=BASELINE_WINDOW)
+    assert cur is not None and base is not None and base > 0
+    ratio = cur / base
+    assert ratio <= CONTRACTION_MULT, (
+        f"first evaluable ratio must be at/below contraction threshold: {ratio}"
+    )
+    # Previous index is before start_i → regime state is definitionally unknown
+    start_i = ATR_PERIOD + BASELINE_WINDOW
+    assert i == start_i
+    assert (i - 1) < start_i
+
     det = ATRContractionDetector()
     obs = det.detect_all_historical(candles)
-    target = candles[34].epoch
+    target = candles[i].epoch
     at_first = [o for o in obs if o.event_time == target]
-    assert at_first == []
+    assert at_first == [], (
+        f"false contraction at first evaluable bar: ratio={ratio}, "
+        f"obs={[o.payload for o in at_first]}"
+    )
 
 
 def test_min_history_unchanged_after_crossing_fix():
