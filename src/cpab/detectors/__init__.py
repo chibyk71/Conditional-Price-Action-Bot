@@ -27,6 +27,7 @@ from cpab.detectors.behavior_volatility import (
     ATRExpansionDetector,
     ATRContractionDetector,
     RangeExpansionDetector,
+    ImpulseDetector,
 )
 
 __all__ = [
@@ -51,6 +52,7 @@ __all__ = [
     "ATRExpansionDetector",
     "ATRContractionDetector",
     "RangeExpansionDetector",
+    "ImpulseDetector",
     "evaluate_raw",
     "AdapterOutcomeKind",
     "CapabilityRegistry",

@@ -66,7 +66,10 @@ bearish_pennant.
 Phase 6A: atr_expansion, atr_contraction, range_expansion — locked ATR period 14,
 baseline mean of preceding 20 rolling ATRs; expansion 1.25× / contraction 0.75×
 crossing-only; range expansion TR ≥ 1.5× preceding ATR (every qualifying bar).
-Warm-up 35 / 35 / 16. Variants rolling_atr_v1 and true_range_v1. Direction None.
+Phase 6B: impulse — body/preceding ATR ≥ 1.0, TR/preceding ATR ≥ 1.5,
+body/range ≥ 0.60; emits bullish/bearish observations for every qualifying bar.
+Warm-up 35 / 35 / 16 / 16. Variants rolling_atr_v1, true_range_v1, and
+atr_normalized_candle_v1. No lifecycle.
 """
 
 from __future__ import annotations
@@ -1371,6 +1374,44 @@ def build_default_registry() -> CapabilityRegistry:
         },
         accepted_params=["atr_period", "threshold", "variant"],
         min_history=16,
+        implementation="behavior_volatility",
+    )
+
+
+    from cpab.detectors.behavior_volatility import (
+        IMPULSE_BODY_ATR_MIN,
+        IMPULSE_TRUE_RANGE_ATR_MIN,
+        IMPULSE_BODY_RANGE_MIN,
+        VARIANT_ATR_NORMALIZED_CANDLE,
+        MIN_HISTORY_IMPULSE,
+    )
+
+    def _impulse_factory(
+        cfg: Optional[dict[str, Any]] = None,
+    ) -> PriceActionDetector:
+        from cpab.detectors.behavior_volatility import ImpulseDetector
+
+        return ImpulseDetector(detector_id="impulse")
+
+    reg.register(
+        "impulse",
+        concepts=["impulse", "bullish_impulse", "bearish_impulse"],
+        factory=_impulse_factory,
+        config={
+            "atr_period": ATR_PERIOD,
+            "body_atr_min": IMPULSE_BODY_ATR_MIN,
+            "true_range_atr_min": IMPULSE_TRUE_RANGE_ATR_MIN,
+            "body_range_min": IMPULSE_BODY_RANGE_MIN,
+            "variant": VARIANT_ATR_NORMALIZED_CANDLE,
+        },
+        accepted_params=[
+            "atr_period",
+            "body_atr_min",
+            "true_range_atr_min",
+            "body_range_min",
+            "variant",
+        ],
+        min_history=MIN_HISTORY_IMPULSE,
         implementation="behavior_volatility",
     )
 

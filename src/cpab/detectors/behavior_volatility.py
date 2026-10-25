@@ -1,11 +1,14 @@
 """
-Phase 6A — Behavioral / volatility regime detectors.
+Phase 6A/6B — Behavioral, volatility, and impulse detectors.
 
-Exactly three detectors:
+Phase 6A detectors:
 
   - atr_expansion   (variant: rolling_atr_v1)
   - atr_contraction (variant: rolling_atr_v1)
   - range_expansion (variant: true_range_v1)
+
+Phase 6B detector:
+  - impulse (variant: atr_normalized_candle_v1)
 
 Locked contract
 ---------------
@@ -16,8 +19,9 @@ Expansion threshold: 1.25× baseline, crossing-only.
 Contraction threshold: 0.75× baseline, crossing-only.
 Range expansion: current true range ≥ 1.5× the preceding ATR; emit for every
   qualifying completed candle (not crossing-only).
-Warm-up: 35 bars for ATR regimes; 16 bars for range expansion.
-Direction: None for all three.
+Warm-up: 35 bars for ATR regimes; 16 bars for range expansion and impulse.
+Impulse: body/preceding ATR ≥ 1.0, true range/preceding ATR ≥ 1.5, and
+body/range ≥ 0.60. Direction follows open/close; flat candles do not emit.
 Strict continuous-segment isolation; no gap bridging.
 No lifecycle, trading signals, volume logic, or TA-Lib dependency.
 """
@@ -33,6 +37,7 @@ from typing import Any, Optional, Sequence
 from cpab.detectors.base import PriceActionDetector
 from cpab.detectors.swing import timeframe_seconds
 from cpab.detectors.wilder_atr import true_range, wilder_atr, _valid_ohlc, _finite
+from cpab.candle_geometry import candle_range, real_body, candle_direction, body_ratio
 from cpab.models import Candle, Observation
 
 logger = logging.getLogger(__name__)
@@ -544,6 +549,154 @@ class RangeExpansionDetector(PriceActionDetector):
                     variant=VARIANT_TRUE_RANGE,
                     detector_id=self._detector_id,
                     detector_config_id=self._detector_config_id,
+                    payload=payload,
+                    metadata=payload,
+                )
+            )
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Single-candle impulse
+# ---------------------------------------------------------------------------
+
+IMPULSE_BODY_ATR_MIN = 1.0
+IMPULSE_TRUE_RANGE_ATR_MIN = 1.5
+IMPULSE_BODY_RANGE_MIN = 0.60
+VARIANT_ATR_NORMALIZED_CANDLE = "atr_normalized_candle_v1"
+MIN_HISTORY_IMPULSE = ATR_PERIOD + 2  # 16 candles: preceding ATR + candidate
+
+
+class ImpulseDetector(PriceActionDetector):
+    """Emit every directional candle meeting the three locked impulse tests."""
+
+    def __init__(self, *, detector_id: str = "impulse") -> None:
+        self._atr_period = ATR_PERIOD
+        self._body_atr_min = IMPULSE_BODY_ATR_MIN
+        self._true_range_atr_min = IMPULSE_TRUE_RANGE_ATR_MIN
+        self._body_range_min = IMPULSE_BODY_RANGE_MIN
+        self._detector_id = detector_id
+        self._config = {
+            "atr_period": self._atr_period,
+            "body_atr_min": self._body_atr_min,
+            "true_range_atr_min": self._true_range_atr_min,
+            "body_range_min": self._body_range_min,
+            "variant": VARIANT_ATR_NORMALIZED_CANDLE,
+        }
+        self._detector_config_id = _config_id(self._config)
+
+    @property
+    def name(self) -> str:
+        return self._detector_id
+
+    @property
+    def detector_config_id(self) -> str:
+        return self._detector_config_id
+
+    @property
+    def min_history(self) -> int:
+        return MIN_HISTORY_IMPULSE
+
+    def config_dict(self) -> dict[str, Any]:
+        return dict(self._config)
+
+    def detect(self, candles: list[Candle]) -> list[Observation]:
+        closed = [c for c in candles if c.is_closed]
+        if len(closed) < self.min_history:
+            return []
+        observations = self._reconstruct(closed)
+        latest = closed[-1].epoch
+        return [o for o in observations if o.confirmed_at == latest]
+
+    def detect_all_historical(self, candles: list[Candle]) -> list[Observation]:
+        closed = [c for c in candles if c.is_closed]
+        if len(closed) < self.min_history:
+            return []
+        return self._reconstruct(closed)
+
+    def _reconstruct(self, closed: list[Candle]) -> list[Observation]:
+        if not closed:
+            return []
+        symbol, timeframe = closed[-1].symbol, closed[-1].timeframe
+        if any(c.symbol != symbol or c.timeframe != timeframe for c in closed):
+            logger.debug("Mixed symbol/timeframe; skipping impulse")
+            return []
+        step = timeframe_seconds(timeframe)
+        if step is None or step <= 0:
+            return []
+        out: list[Observation] = []
+        for segment in _continuous_segments(closed, step=step):
+            out.extend(self._reconstruct_segment(segment, step=step))
+        return out
+
+    def _reconstruct_segment(
+        self, segment: list[Candle], *, step: int
+    ) -> list[Observation]:
+        if len(segment) < self.min_history:
+            return []
+        atrs = _rolling_atr_series(segment, period=self._atr_period, step=step)
+        out: list[Observation] = []
+        # Candidate i uses ATR[i-1], so its own range/body cannot affect baseline.
+        for i in range(self._atr_period + 1, len(segment)):
+            c, prev_c = segment[i], segment[i - 1]
+            if not _valid_ohlc(c) or not _valid_ohlc(prev_c):
+                continue
+            if c.epoch - prev_c.epoch != step:
+                continue
+            atr = atrs[i - 1]
+            if atr is None or not _finite(atr) or atr <= 0.0:
+                continue
+
+            body = real_body(c)
+            candle_rng = candle_range(c)
+            direction = candle_direction(c)
+            if candle_rng <= 0.0 or direction == "neutral":
+                continue
+            tr = true_range(c.high, c.low, prev_c.close)
+            body_atr = body / atr
+            tr_atr = tr / atr
+            body_rng = body_ratio(c)
+            if not all(_finite(x) for x in (body, candle_rng, tr, body_atr, tr_atr)):
+                continue
+            if body_rng is None or not _finite(body_rng):
+                continue
+            if (
+                body_atr < self._body_atr_min
+                or tr_atr < self._true_range_atr_min
+                or body_rng < self._body_range_min
+            ):
+                continue
+
+            payload = {
+                "real_body": float(body),
+                "candle_range": float(candle_rng),
+                "true_range": float(tr),
+                "preceding_atr": float(atr),
+                "body_atr_ratio": float(body_atr),
+                "true_range_atr_ratio": float(tr_atr),
+                "body_range_ratio": float(body_rng),
+                "atr_period": self._atr_period,
+                "thresholds": {
+                    "body_atr_min": self._body_atr_min,
+                    "true_range_atr_min": self._true_range_atr_min,
+                    "body_range_min": self._body_range_min,
+                },
+            }
+            out.append(
+                Observation.create(
+                    type="bullish_impulse" if direction == "bullish" else "bearish_impulse",
+                    symbol=c.symbol,
+                    timeframe=c.timeframe,
+                    candle_epoch=c.epoch,
+                    event_time=c.epoch,
+                    confirmed_at=c.epoch,
+                    developing=False,
+                    direction=direction,
+                    variant=VARIANT_ATR_NORMALIZED_CANDLE,
+                    detector_id=self._detector_id,
+                    detector_config_id=self._detector_config_id,
+                    reference_ids=[],
+                    lifecycle_state=None,
                     payload=payload,
                     metadata=payload,
                 )
