@@ -1285,6 +1285,16 @@ def build_default_registry() -> CapabilityRegistry:
         implementation="flags_pennants",
     )
 
+    from cpab.detectors.behavior_volatility import (
+        ATR_PERIOD,
+        BASELINE_WINDOW,
+        EXPANSION_MULT,
+        CONTRACTION_MULT,
+        RANGE_EXPANSION_MULT,
+        VARIANT_ROLLING_ATR,
+        VARIANT_TRUE_RANGE,
+    )
+
     def _atr_expansion_factory(
         cfg: Optional[dict[str, Any]] = None,
     ) -> PriceActionDetector:
@@ -1296,8 +1306,20 @@ def build_default_registry() -> CapabilityRegistry:
         "atr_expansion",
         concepts=["atr_expansion"],
         factory=_atr_expansion_factory,
-        config={},
-        accepted_params=[],
+        config={
+            "atr_period": ATR_PERIOD,
+            "baseline_window": BASELINE_WINDOW,
+            "crossing": "above",
+            "threshold": EXPANSION_MULT,
+            "variant": VARIANT_ROLLING_ATR,
+        },
+        accepted_params=[
+            "atr_period",
+            "baseline_window",
+            "crossing",
+            "threshold",
+            "variant",
+        ],
         min_history=35,
         implementation="behavior_volatility",
     )
@@ -1313,8 +1335,20 @@ def build_default_registry() -> CapabilityRegistry:
         "atr_contraction",
         concepts=["atr_contraction"],
         factory=_atr_contraction_factory,
-        config={},
-        accepted_params=[],
+        config={
+            "atr_period": ATR_PERIOD,
+            "baseline_window": BASELINE_WINDOW,
+            "crossing": "below",
+            "threshold": CONTRACTION_MULT,
+            "variant": VARIANT_ROLLING_ATR,
+        },
+        accepted_params=[
+            "atr_period",
+            "baseline_window",
+            "crossing",
+            "threshold",
+            "variant",
+        ],
         min_history=35,
         implementation="behavior_volatility",
     )
@@ -1330,8 +1364,12 @@ def build_default_registry() -> CapabilityRegistry:
         "range_expansion",
         concepts=["range_expansion"],
         factory=_range_expansion_factory,
-        config={},
-        accepted_params=[],
+        config={
+            "atr_period": ATR_PERIOD,
+            "threshold": RANGE_EXPANSION_MULT,
+            "variant": VARIANT_TRUE_RANGE,
+        },
+        accepted_params=["atr_period", "threshold", "variant"],
         min_history=16,
         implementation="behavior_volatility",
     )

@@ -86,22 +86,80 @@ def _rolling_atr_series(
     step: Optional[int] = None,
 ) -> list[Optional[float]]:
     """
-    Wilder ATR ending at each index, or None when the window is invalid.
+    Genuine Wilder-smoothed ATR series ending at each index.
 
-    Index i (0-based) receives ATR computed on segment[i - period : i + 1]
-    (period + 1 bars: preceding close + period TRs). Returns None when
-    insufficient history, gap (if step given), or invalid OHLC in the window.
+    Seeding:
+      Arithmetic mean of the first `period` true ranges in a continuous valid run.
+      Requires `period + 1` consecutive valid candles (the first supplies prev_close).
+      Index of the seed ATR is `period` bars after the start of the valid run.
+
+    Smoothing:
+      For subsequent valid bars in the continuous run:
+        atr_i = atr_{i-1} * (period - 1) / period + tr_i * (1 / period)
+
+    Gaps & Invalid OHLC:
+      Any gap (when `step` is specified) or invalid OHLC terminates the continuous
+      run. The invalid bar receives None. A fresh run must accumulate `period + 1`
+      consecutive valid bars to seed a new ATR (invalid-window recovery).
     """
     n = len(segment)
     out: list[Optional[float]] = [None] * n
-    need = period + 1
-    for i in range(period, n):
-        window = segment[i - period : i + 1]
-        # Explicit length guard; wilder_atr also checks.
-        if len(window) != need:
+    if period < 1 or n < period + 1:
+        return out
+
+    run_start: Optional[int] = None
+    last_atr: Optional[float] = None
+    seed_trs: list[float] = []
+
+    for i in range(n):
+        c = segment[i]
+        if not _valid_ohlc(c):
+            run_start = None
+            last_atr = None
+            seed_trs = []
             continue
-        atr = wilder_atr(window, lookback=period, step=step)
-        out[i] = atr
+
+        if run_start is None:
+            run_start = i
+            last_atr = None
+            seed_trs = []
+            continue
+
+        if step is not None and (c.epoch - segment[i - 1].epoch != step):
+            run_start = i
+            last_atr = None
+            seed_trs = []
+            continue
+
+        tr = true_range(c.high, c.low, segment[i - 1].close)
+        if not _finite(tr) or tr < 0:
+            run_start = None
+            last_atr = None
+            seed_trs = []
+            continue
+
+        if last_atr is None:
+            seed_trs.append(tr)
+            if len(seed_trs) == period:
+                initial_atr = sum(seed_trs) / period
+                if _finite(initial_atr):
+                    last_atr = float(initial_atr)
+                    out[i] = last_atr
+                    seed_trs = []
+                else:
+                    run_start = None
+                    last_atr = None
+                    seed_trs = []
+        else:
+            new_atr = (last_atr * (period - 1) + tr) / period
+            if _finite(new_atr):
+                last_atr = float(new_atr)
+                out[i] = last_atr
+            else:
+                run_start = None
+                last_atr = None
+                seed_trs = []
+
     return out
 
 
