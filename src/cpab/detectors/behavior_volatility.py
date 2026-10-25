@@ -6,6 +6,8 @@ Phase 6A detectors:
   - atr_expansion   (variant: rolling_atr_v1)
   - atr_contraction (variant: rolling_atr_v1)
   - range_expansion (variant: true_range_v1)
+
+Phase 6B detector:
   - impulse (variant: atr_normalized_candle_v1)
 
 Locked contract
