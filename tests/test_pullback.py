@@ -985,6 +985,43 @@ class TestDeterministicIdentity:
         oid_term = _stable_pullback_id(**common, lifecycle_event="trend_resumption")
         assert oid_start != oid_term
 
+    def test_all_variant_shares_impulse_observation_identity(self):
+        """variant='all' impulse observations match dedicated impulse_based detector."""
+        bars = impulse_series_bullish()
+        bars.append(c(16, 102, 102.5, 100.5, 101, symbol="PB_100", timeframe="1m"))
+
+        det_all = PullbackDetector(variant="all")
+        det_ib = PullbackDetector(variant="impulse_based")
+
+        obs_all_ib = [o for o in det_all.detect_all_historical(bars) if o.variant == "impulse_based"]
+        obs_ib = det_ib.detect_all_historical(bars)
+
+        assert obs_ib, "expected at least one impulse_based observation"
+        assert {o.id for o in obs_ib} == {o.id for o in obs_all_ib}
+        assert {o.detector_config_id for o in obs_ib} == {o.detector_config_id for o in obs_all_ib}
+        # Observation config ids match the dedicated detector, not the 'all' detector.
+        assert all(o.detector_config_id == det_ib.detector_config_id for o in obs_all_ib)
+        assert det_all.detector_config_id != det_ib.detector_config_id
+
+    def test_all_variant_detector_config_id_distinct(self):
+        """Detector-level config id for variant='all' differs from single-variant detectors."""
+        det_all = PullbackDetector(variant="all")
+        det_sb = PullbackDetector(variant="structure_based")
+        det_ib = PullbackDetector(variant="impulse_based")
+        assert det_all.detector_config_id != det_sb.detector_config_id
+        assert det_all.detector_config_id != det_ib.detector_config_id
+        assert det_sb.detector_config_id != det_ib.detector_config_id
+
+    def test_single_variant_observation_config_id_matches_detector(self):
+        """Dedicated variant detectors embed their own detector_config_id on observations."""
+        bars = impulse_series_bullish()
+        bars.append(c(16, 102, 102.5, 100.5, 101, symbol="PB_100", timeframe="1m"))
+        det = PullbackDetector(variant="impulse_based")
+        obs = det.detect_all_historical(bars)
+        assert obs
+        for o in obs:
+            assert o.detector_config_id == det.detector_config_id
+
 
 # ===========================================================================
 # Additional edge-case tests
