@@ -60,6 +60,24 @@ Deduplication & Provenance:
   - Distinct sources may have concurrent pullbacks.
   - Repeated processing is idempotent.
   - Provenance records only observations actually used.
+
+Data continuity (gaps / invalid OHLC) — V1, aligned with zone_retest:
+  - Gaps must never be bridged. Continuous only when successive open epochs
+    differ by exactly the timeframe step (same as Phase 2A / 2D / 3B / 3C).
+  - An invalid OHLC candle is treated as a hard segment boundary.
+  - When continuity breaks while a source is pending or active, that source's
+    lifecycle is abandoned for V1: internal tracking ends and the source cannot
+    start or continue a pullback afterward.
+  - No separate terminal observation is emitted for data-continuity abandonment
+    (same convention as zone_retest sequence invalidation: "No separate
+    invalidation observation is emitted in V1"). Price-based terminals remain
+    the only emitted terminations: trend_resumption, structural_failure, and
+    impulse invalidation.
+  - Downstream consumers that observe a start (lifecycle_state=active) and need
+    to know whether the pullback is still trackable must not assume perpetual
+    activity: either require a subsequent price-based terminal event, or treat
+    a gap / invalid candle in the closed series after the start as ending the
+    active track (no emission required from this detector).
 """
 
 from __future__ import annotations
@@ -380,8 +398,9 @@ class PullbackDetector(PriceActionDetector):
                 cur = closed[j]
                 prev = closed[j - 1]
 
-                # Hard segment boundary: gap or invalid OHLC ends any pending/active
-                # lifecycle for this source. Do not bridge across broken data.
+                # Hard segment boundary (zone_retest V1 convention): gap or invalid OHLC
+                # abandons pending/active tracking for this source with no terminal
+                # observation. Do not bridge across broken data.
                 if cur.epoch - prev.epoch != step:
                     if lifecycle_status in ("pending", "active"):
                         lifecycle_status = "terminated"
@@ -543,8 +562,9 @@ class PullbackDetector(PriceActionDetector):
                 cur = closed[j]
                 prev = closed[j - 1]
 
-                # Hard segment boundary: gap or invalid OHLC ends any pending/active
-                # lifecycle for this source. Do not bridge across broken data.
+                # Hard segment boundary (zone_retest V1 convention): gap or invalid OHLC
+                # abandons pending/active tracking for this source with no terminal
+                # observation. Do not bridge across broken data.
                 if cur.epoch - prev.epoch != step:
                     if lifecycle_status in ("pending", "active"):
                         lifecycle_status = "terminated"

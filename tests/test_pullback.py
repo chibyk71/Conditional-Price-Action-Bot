@@ -894,7 +894,10 @@ class TestDataIntegrity:
     def test_gap_during_active_lifecycle_stops_tracking(self):
         """
         Once a pullback has started, a subsequent gap abandons the active
-        lifecycle; post-gap bars must not emit termination for that source.
+        lifecycle without emitting a terminal observation (zone_retest V1
+        convention: no separate invalidation observation for sequence
+        invalidation / data discontinuity). Post-gap bars must not emit
+        price-based termination for that source either.
         """
         bars = impulse_series_bullish()
         # Contiguous start: close against bullish impulse
@@ -908,10 +911,16 @@ class TestDataIntegrity:
         terms = [
             o
             for o in obs
-            if o.payload.get("lifecycle_event") in ("invalidation", "trend_resumption")
+            if o.payload.get("lifecycle_event")
+            in ("invalidation", "trend_resumption", "structural_failure")
         ]
         assert len(starts) >= 1
-        assert terms == [], "Must not terminate a lifecycle across a gap"
+        assert all(s.lifecycle_state == "active" for s in starts)
+        # Intentional V1: data-continuity abandonment is silent (no terminal event).
+        assert terms == [], (
+            "Data gap must not emit a terminal observation; "
+            "abandonment is silent per zone_retest V1 continuity rules"
+        )
 
     def test_invalid_ohlc_candle_skipped(self):
         """Candle with high < low (malformed) must be skipped."""
