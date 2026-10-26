@@ -83,10 +83,20 @@ class ConditionEvaluator:
 
         for req in condition.require_observations:
             req_type = req.get("type")
+            req_variant = req.get("variant")
             min_count = int(req.get("min_count", 1))
             allow_developing = bool(req.get("allow_developing", False))
 
-            candidates = [o for o in obs_list if o.type == req_type]
+            # Strict type matching: type filters only observation.type.
+            # Variant filters only when explicitly specified. No type↔variant
+            # fallback (avoids e.g. type="hh" matching variant="hh" on another type).
+            candidates = [
+                o
+                for o in obs_list
+                if (req_type is None or o.type == req_type)
+                and (req_variant is None or o.variant == req_variant)
+                and (req_type is not None or req_variant is not None)
+            ]
             if T is not None:
                 matches = [
                     o
@@ -114,16 +124,22 @@ class ConditionEvaluator:
 
             if len(matches) < min_count:
                 met = False
+                desc = f"type={req_type}" if req_type else f"variant={req_variant}"
+                if req_type and req_variant:
+                    desc = f"type={req_type} variant={req_variant}"
                 reasons.append(
-                    f"missing observation type={req_type} need>={min_count} "
+                    f"missing observation {desc} need>={min_count} "
                     f"got={len(matches)} (eligible at T={T})"
                 )
             else:
                 chosen = matches[:min_count]
                 supporting_ids.extend(o.id for o in chosen)
                 supporting_obs.extend(chosen)
+                desc = f"type={req_type}" if req_type else f"variant={req_variant}"
+                if req_type and req_variant:
+                    desc = f"type={req_type} variant={req_variant}"
                 reasons.append(
-                    f"observation type={req_type} satisfied count={len(matches)}"
+                    f"observation {desc} satisfied count={len(matches)}"
                 )
 
         if not condition.require_observations:
