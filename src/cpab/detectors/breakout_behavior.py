@@ -322,6 +322,7 @@ class BreakoutBehaviorDetector(PriceActionDetector):
             "direction": direction,
             "failure_policy": self._failure_policy,
             "lifecycle_event": "confirmation" if event_type == "breakout_confirmed" else "failure",
+            "lifecycle_state": "active" if event_type == "breakout_confirmed" else "failed",
         }
         event_id = _stable_breakout_id(
             symbol=candle.symbol,
@@ -349,6 +350,7 @@ class BreakoutBehaviorDetector(PriceActionDetector):
             detector_id=self._detector_id,
             detector_config_id=self._detector_config_id,
             reference_ids=(source.id,),
+            lifecycle_state="active" if event_type == "breakout_confirmed" else "failed",
             payload=payload,
             metadata=payload,
             id=event_id,
