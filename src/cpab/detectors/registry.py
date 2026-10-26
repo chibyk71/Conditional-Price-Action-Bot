@@ -73,6 +73,9 @@ atr_normalized_candle_v1. No lifecycle.
 
 Phase 6C: pullback — detector_id pullback, variants structure_based and impulse_based;
 tracks pullback start, continuation, and termination (trend_resumption, structural_failure, invalidation).
+
+Phase 6D: breakout_behavior — confirmed swing and zero-width S/R boundaries;
+strict causal confirmation; close_back_across or confirmed_close_back_across failure.
 """
 
 from __future__ import annotations
