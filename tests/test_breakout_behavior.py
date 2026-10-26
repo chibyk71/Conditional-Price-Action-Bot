@@ -80,6 +80,28 @@ def test_breakout_confirmation_and_failure_use_completed_closes():
     assert source_events[1].confirmed_at == START + 4 * STEP
 
 
+def test_bearish_breakout_of_confirmed_swing_low():
+    bars = [
+        c(0, 100, 101, 98, 100),
+        c(1, 96, 99, 95, 96),
+        c(2, 99, 101, 97, 99),
+        c(3, 96, 98, 93, 94),
+        c(4, 94, 97, 92, 96),
+    ]
+    detector = BreakoutBehaviorDetector(failure_policy="close_back_across")
+    events = detector.detect_all_historical(bars)
+    low_events = [
+        event for event in events
+        if event.payload.get("source_type") == "swing_low"
+        and event.payload.get("boundary") == 95.0
+    ]
+    assert [event.variant for event in low_events] == [
+        "breakout_confirmed",
+        "breakout_failed",
+    ]
+    assert all(event.direction == "bearish" for event in low_events)
+
+
 def test_source_confirmation_candle_cannot_confirm_its_own_breakout():
     detector = BreakoutBehaviorDetector()
     # Bar 2 confirms the swing; only bar 3 or later can trigger a breakout.
