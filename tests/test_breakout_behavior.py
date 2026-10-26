@@ -74,6 +74,8 @@ def test_breakout_confirmation_and_failure_use_completed_closes():
     assert source_events[0].direction == "bullish"
     assert source_events[0].payload["boundary"] == 105.0
     assert source_events[0].reference_ids == (source_id,)
+    assert source_events[0].lifecycle_state == "active"
+    assert source_events[1].lifecycle_state == "failed"
     assert source_events[0].confirmed_at == START + 3 * STEP
     assert source_events[1].confirmed_at == START + 4 * STEP
 
@@ -129,6 +131,25 @@ def test_invalid_ohlc_silently_abandons_active_lifecycle(policy):
     source_id = swing_high_id(events)
     source_events = events_for_source(events, source_id)
     assert [event.variant for event in source_events] == ["breakout_confirmed"]
+
+
+def test_confirmed_failure_resets_when_breakout_side_is_reclaimed():
+    detector = BreakoutBehaviorDetector(failure_policy="confirmed_close_back_across")
+    events = detector.detect_all_historical(breakout_bars([106, 104, 106]))
+    source_id = swing_high_id(events)
+    source_events = events_for_source(events, source_id)
+    assert [event.variant for event in source_events] == ["breakout_confirmed"]
+
+
+def test_forming_candles_are_ignored():
+    detector = BreakoutBehaviorDetector()
+    bars = breakout_bars([106])
+    last = bars[-1]
+    bars[-1] = Candle(
+        last.symbol, last.timeframe, last.epoch,
+        last.open, last.high, last.low, last.close, False
+    )
+    assert detector.detect_all_historical(bars) == []
 
 
 def test_source_identity_keeps_equal_price_swing_and_zone_distinct():
