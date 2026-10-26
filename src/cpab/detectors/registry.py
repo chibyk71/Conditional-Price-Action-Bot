@@ -73,6 +73,9 @@ atr_normalized_candle_v1. No lifecycle.
 
 Phase 6C: pullback — detector_id pullback, variants structure_based and impulse_based;
 tracks pullback start, continuation, and termination (trend_resumption, structural_failure, invalidation).
+
+Phase 6D: breakout_behavior — confirmed swing and zero-width S/R boundaries;
+strict causal confirmation; close_back_across or confirmed_close_back_across failure.
 """
 
 from __future__ import annotations
@@ -682,6 +685,33 @@ class CapabilityRegistry:
                     + right
                     + 4
                 )
+            elif impl == "breakout_behavior":
+                from cpab.detectors.breakout_behavior import _validate_failure_policy
+                from cpab.detectors.swing import _validate_strength, _validate_tie_policy
+
+                defaults = {
+                    "failure_policy": "close_back_across",
+                    "left_strength": 1,
+                    "right_strength": 1,
+                    "tie_policy": "strict",
+                }
+                merged = dict(defaults)
+                merged.update(effective)
+                if accepted is not None:
+                    for key, val in config.items():
+                        if key in accepted:
+                            merged[key] = val
+                failure_policy = _validate_failure_policy(merged.get("failure_policy"))
+                left = _validate_strength("left_strength", merged.get("left_strength", 1))
+                right = _validate_strength("right_strength", merged.get("right_strength", 1))
+                tie = _validate_tie_policy(merged.get("tie_policy", "strict"))
+                effective = {
+                    "failure_policy": failure_policy,
+                    "left_strength": left,
+                    "right_strength": right,
+                    "tie_policy": tie,
+                }
+                mh = left + 1 + right
             elif impl == "pullback":
                 from cpab.detectors.swing import _validate_strength, _validate_tie_policy
                 from cpab.detectors.pullback import ALLOWED_VARIANTS
@@ -1491,6 +1521,30 @@ def build_default_registry() -> CapabilityRegistry:
         ],
         min_history=6,
         implementation="pullback",
+    )
+
+    def _breakout_behavior_factory(
+        cfg: Optional[dict[str, Any]] = None,
+    ) -> PriceActionDetector:
+        from cpab.detectors.breakout_behavior import BreakoutBehaviorDetector
+
+        c = dict(cfg or {})
+        return BreakoutBehaviorDetector(
+            failure_policy=c.get("failure_policy", "close_back_across"),
+            left_strength=c.get("left_strength", 1),
+            right_strength=c.get("right_strength", 1),
+            tie_policy=c.get("tie_policy", "strict"),
+            detector_id="breakout_behavior",
+        )
+
+    reg.register(
+        "breakout_behavior",
+        concepts=["breakout_behavior", "breakout"],
+        factory=_breakout_behavior_factory,
+        config={},
+        accepted_params=["failure_policy", "left_strength", "right_strength", "tie_policy"],
+        min_history=3,
+        implementation="breakout_behavior",
     )
 
     return reg
