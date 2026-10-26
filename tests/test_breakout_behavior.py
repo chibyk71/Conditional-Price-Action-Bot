@@ -1,4 +1,4 @@
-"""Phase 6D — Breakout Behavior regression tests."""
+"""Phase 6D/6E — Breakout Behavior and follow-through regression tests."""
 
 from __future__ import annotations
 
@@ -191,6 +191,7 @@ def test_failure_policy_changes_config_identity_and_registry_validation():
     second = BreakoutBehaviorDetector(failure_policy="confirmed_close_back_across")
     assert first.detector_config_id != second.detector_config_id
 
+    pytest.importorskip("talib")
     registry = build_default_registry()
     info = registry.validate_config(
         "breakout_behavior", {"failure_policy": "confirmed_close_back_across"}
@@ -214,3 +215,248 @@ def test_incremental_and_historical_results_are_deterministic():
     ]
     latest = detector.detect(bars)
     assert all(event.confirmed_at == bars[-1].epoch for event in latest)
+
+
+
+# ---------------------------------------------------------------------------
+# Phase 6E — breakout follow-through (opt-in)
+# ---------------------------------------------------------------------------
+
+
+def test_bullish_follow_through_strict_beyond_confirmation_high():
+    detector = BreakoutBehaviorDetector(enable_follow_through=True)
+    # Confirmation at close 106; helper sets high = max(prev, close)+1 = 107.
+    # Next close 107 equals conf high → no FT; close 108 → FT.
+    events = detector.detect_all_historical(breakout_bars([106, 107, 108]))
+    source_id = swing_high_id(events)
+    source_events = events_for_source(events, source_id)
+    variants = [e.variant for e in source_events]
+    assert "breakout_confirmed" in variants
+    assert "breakout_follow_through" in variants
+    ft = next(e for e in source_events if e.variant == "breakout_follow_through")
+    conf = next(e for e in source_events if e.variant == "breakout_confirmed")
+    assert ft.direction == "bullish"
+    assert ft.payload["originating_breakout_id"] == conf.id
+    assert conf.id in ft.reference_ids
+    assert ft.payload["confirmation_high"] == 107.0
+
+
+def test_bearish_follow_through_strict_beyond_confirmation_low():
+    detector = BreakoutBehaviorDetector(enable_follow_through=True)
+    bars = [
+        c(0, 100, 102, 99, 100),
+        c(1, 97, 98, 95, 96),   # swing low 95
+        c(2, 97, 99, 96, 98),   # confirms swing low
+        c(3, 96, 97, 94, 94),   # breakout close < 95
+        c(4, 93, 94, 92, 92.5), # equal-ish to conf low? conf low was 94
+        c(5, 92, 93, 90, 91),   # close 91 < conf low 94 → FT
+    ]
+    events = detector.detect_all_historical(bars)
+    low_events = [
+        e for e in events
+        if e.payload.get("source_type") == "swing_low"
+        and e.payload.get("boundary") == 95.0
+    ]
+    variants = [e.variant for e in low_events]
+    assert "breakout_confirmed" in variants
+    assert "breakout_follow_through" in variants
+    assert all(e.direction == "bearish" for e in low_events if e.variant != "breakout_failed")
+
+
+def test_equality_with_confirmation_extreme_does_not_qualify():
+    detector = BreakoutBehaviorDetector(enable_follow_through=True)
+    # conf close 106 → high 107; subsequent close 107 == high → no FT
+    events = detector.detect_all_historical(breakout_bars([106, 107]))
+    source_id = swing_high_id(events)
+    source_events = events_for_source(events, source_id)
+    assert [e.variant for e in source_events] == ["breakout_confirmed"]
+
+
+def test_no_follow_through_when_disabled_or_without_confirmation():
+    disabled = BreakoutBehaviorDetector(enable_follow_through=False)
+    events = disabled.detect_all_historical(breakout_bars([106, 110]))
+    assert not any(e.variant == "breakout_follow_through" for e in events)
+
+    # No close beyond boundary → no confirmation → no FT
+    enabled = BreakoutBehaviorDetector(enable_follow_through=True)
+    events = enabled.detect_all_historical(breakout_bars([101, 102, 103]))
+    assert not any(
+        e.variant in ("breakout_confirmed", "breakout_follow_through")
+        and e.payload.get("source_type") == "swing_high"
+        and e.payload.get("boundary") == 105.0
+        for e in events
+    )
+
+
+def test_no_follow_through_on_confirmation_candle_itself():
+    detector = BreakoutBehaviorDetector(enable_follow_through=True)
+    # Single breakout bar only — confirmation candle cannot also be FT.
+    events = detector.detect_all_historical(breakout_bars([106]))
+    source_id = swing_high_id(events)
+    source_events = events_for_source(events, source_id)
+    assert [e.variant for e in source_events] == ["breakout_confirmed"]
+
+
+def test_follow_through_after_multiple_subsequent_candles():
+    detector = BreakoutBehaviorDetector(enable_follow_through=True)
+    # conf at 106 (high 107); 107 equal (no), 106.5 still below, then 109 FT
+    events = detector.detect_all_historical(breakout_bars([106, 107, 106.5, 109]))
+    source_id = swing_high_id(events)
+    source_events = events_for_source(events, source_id)
+    variants = [e.variant for e in source_events]
+    assert variants.count("breakout_follow_through") == 1
+    conf = next(e for e in source_events if e.variant == "breakout_confirmed")
+    ft = next(e for e in source_events if e.variant == "breakout_follow_through")
+    assert ft.confirmed_at > conf.confirmed_at
+
+
+def test_failure_before_follow_through_prevents_later_ft():
+    detector = BreakoutBehaviorDetector(
+        failure_policy="close_back_across",
+        enable_follow_through=True,
+    )
+    # confirm 106, fail 104, later 110 would have been FT but lifecycle ended
+    events = detector.detect_all_historical(breakout_bars([106, 104, 110]))
+    source_id = swing_high_id(events)
+    source_events = events_for_source(events, source_id)
+    assert [e.variant for e in source_events] == [
+        "breakout_confirmed",
+        "breakout_failed",
+    ]
+
+
+def test_failure_after_follow_through_still_possible():
+    detector = BreakoutBehaviorDetector(
+        failure_policy="close_back_across",
+        enable_follow_through=True,
+    )
+    # confirm 106 (high 107), FT at 109, then fail at 104
+    events = detector.detect_all_historical(breakout_bars([106, 109, 104]))
+    source_id = swing_high_id(events)
+    source_events = events_for_source(events, source_id)
+    assert [e.variant for e in source_events] == [
+        "breakout_confirmed",
+        "breakout_follow_through",
+        "breakout_failed",
+    ]
+
+
+def test_exactly_one_follow_through_per_originating_breakout():
+    detector = BreakoutBehaviorDetector(enable_follow_through=True)
+    events = detector.detect_all_historical(breakout_bars([106, 109, 111, 113]))
+    source_id = swing_high_id(events)
+    source_events = events_for_source(events, source_id)
+    variants = [e.variant for e in source_events]
+    assert variants.count("breakout_follow_through") == 1
+
+
+def test_follow_through_independent_sources_same_price():
+    detector = BreakoutBehaviorDetector(enable_follow_through=True)
+    events = detector.detect_all_historical(breakout_bars([106, 109]))
+    confirmed = [
+        e for e in events
+        if e.variant == "breakout_confirmed" and e.payload["boundary"] == 105.0
+    ]
+    fts = [
+        e for e in events
+        if e.variant == "breakout_follow_through" and e.payload["boundary"] == 105.0
+    ]
+    assert len(confirmed) == 2
+    assert len(fts) == 2
+    assert len({e.payload["source_id"] for e in fts}) == 2
+    assert len({e.id for e in fts}) == 2
+    for ft in fts:
+        assert ft.payload["originating_breakout_id"] in {c.id for c in confirmed}
+
+
+def test_gap_abandons_follow_through_tracking():
+    detector = BreakoutBehaviorDetector(enable_follow_through=True)
+    bars = breakout_bars([106, 109], gap_at=4)
+    events = detector.detect_all_historical(bars)
+    source_id = swing_high_id(events)
+    source_events = events_for_source(events, source_id)
+    # gap on the would-be FT bar abandons tracking; only confirmation remains
+    assert [e.variant for e in source_events] == ["breakout_confirmed"]
+
+
+def test_invalid_ohlc_abandons_follow_through_tracking():
+    detector = BreakoutBehaviorDetector(enable_follow_through=True)
+    bars = breakout_bars([106, 109], invalid_at=4)
+    events = detector.detect_all_historical(bars)
+    source_id = swing_high_id(events)
+    source_events = events_for_source(events, source_id)
+    assert [e.variant for e in source_events] == ["breakout_confirmed"]
+
+
+def test_forming_candle_excluded_from_follow_through():
+    detector = BreakoutBehaviorDetector(enable_follow_through=True)
+    bars = breakout_bars([106, 109])
+    last = bars[-1]
+    bars[-1] = Candle(
+        last.symbol, last.timeframe, last.epoch,
+        last.open, last.high, last.low, last.close, False,
+    )
+    events = detector.detect_all_historical(bars)
+    # forming last bar ignored → only confirmation from completed prefix
+    assert not any(e.variant == "breakout_follow_through" for e in events)
+
+
+def test_enable_follow_through_changes_config_identity_when_true():
+    off = BreakoutBehaviorDetector(enable_follow_through=False)
+    on = BreakoutBehaviorDetector(enable_follow_through=True)
+    assert off.detector_config_id != on.detector_config_id
+    # Default / disabled preserves legacy Phase 6D identity shape
+    legacy = BreakoutBehaviorDetector()
+    assert "enable_follow_through" not in legacy.config_dict()
+    assert "enable_follow_through" not in off.config_dict()
+    assert on.config_dict()["enable_follow_through"] is True
+
+    pytest.importorskip("talib")
+    registry = build_default_registry()
+    info_off = registry.validate_config("breakout_behavior", {})
+    assert "enable_follow_through" not in info_off.config or info_off.config.get(
+        "enable_follow_through"
+    ) is not True
+    info_on = registry.validate_config(
+        "breakout_behavior", {"enable_follow_through": True}
+    )
+    assert info_on.config.get("enable_follow_through") is True
+    assert info_off.detector_config_id != info_on.detector_config_id
+
+    with pytest.raises(ValueError):
+        registry.validate_config(
+            "breakout_behavior", {"enable_follow_through": "yes"}
+        )
+
+    detector, info = registry.create_detector(
+        "breakout_behavior", config={"enable_follow_through": True}
+    )
+    assert detector.detector_config_id == info.detector_config_id
+    assert detector.config_dict().get("enable_follow_through") is True
+
+
+def test_follow_through_ids_deterministic_and_parity():
+    bars = breakout_bars([106, 109, 104])
+    detector = BreakoutBehaviorDetector(enable_follow_through=True)
+    historical = detector.detect_all_historical(bars)
+    repeated = detector.detect_all_historical(bars)
+    assert [(e.id, e.variant) for e in historical] == [
+        (e.id, e.variant) for e in repeated
+    ]
+    assert any(e.variant == "breakout_follow_through" for e in historical)
+    latest = detector.detect(bars)
+    assert all(e.confirmed_at == bars[-1].epoch for e in latest)
+
+
+def test_default_disabled_preserves_phase6d_event_behavior():
+    """When follow-through is off, Phase 6D events and IDs match prior semantics."""
+    bars = breakout_bars([106, 104])
+    off = BreakoutBehaviorDetector(enable_follow_through=False)
+    default = BreakoutBehaviorDetector()
+    events_off = off.detect_all_historical(bars)
+    events_default = default.detect_all_historical(bars)
+    assert [(e.id, e.variant) for e in events_off] == [
+        (e.id, e.variant) for e in events_default
+    ]
+    assert not any(e.variant == "breakout_follow_through" for e in events_off)
+    assert off.detector_config_id == default.detector_config_id

@@ -76,6 +76,8 @@ tracks pullback start, continuation, and termination (trend_resumption, structur
 
 Phase 6D: breakout_behavior — confirmed swing and zero-width S/R boundaries;
 strict causal confirmation; close_back_across or confirmed_close_back_across failure.
+Phase 6E: optional enable_follow_through (default False) emits breakout_follow_through
+after a later completed candle closes strictly beyond the confirmation candle high/low.
 """
 
 from __future__ import annotations
@@ -686,7 +688,10 @@ class CapabilityRegistry:
                     + 4
                 )
             elif impl == "breakout_behavior":
-                from cpab.detectors.breakout_behavior import _validate_failure_policy
+                from cpab.detectors.breakout_behavior import (
+                    _validate_enable_follow_through,
+                    _validate_failure_policy,
+                )
                 from cpab.detectors.swing import _validate_strength, _validate_tie_policy
 
                 defaults = {
@@ -694,6 +699,7 @@ class CapabilityRegistry:
                     "left_strength": 1,
                     "right_strength": 1,
                     "tie_policy": "strict",
+                    "enable_follow_through": False,
                 }
                 merged = dict(defaults)
                 merged.update(effective)
@@ -705,12 +711,18 @@ class CapabilityRegistry:
                 left = _validate_strength("left_strength", merged.get("left_strength", 1))
                 right = _validate_strength("right_strength", merged.get("right_strength", 1))
                 tie = _validate_tie_policy(merged.get("tie_policy", "strict"))
+                enable_ft = _validate_enable_follow_through(
+                    merged.get("enable_follow_through", False)
+                )
+                # Keep default Phase 6D config identity: omit disabled flag.
                 effective = {
                     "failure_policy": failure_policy,
                     "left_strength": left,
                     "right_strength": right,
                     "tie_policy": tie,
                 }
+                if enable_ft:
+                    effective["enable_follow_through"] = True
                 mh = left + 1 + right
             elif impl == "pullback":
                 from cpab.detectors.swing import _validate_strength, _validate_tie_policy
@@ -1534,6 +1546,7 @@ def build_default_registry() -> CapabilityRegistry:
             left_strength=c.get("left_strength", 1),
             right_strength=c.get("right_strength", 1),
             tie_policy=c.get("tie_policy", "strict"),
+            enable_follow_through=c.get("enable_follow_through", False),
             detector_id="breakout_behavior",
         )
 
@@ -1542,7 +1555,13 @@ def build_default_registry() -> CapabilityRegistry:
         concepts=["breakout_behavior", "breakout"],
         factory=_breakout_behavior_factory,
         config={},
-        accepted_params=["failure_policy", "left_strength", "right_strength", "tie_policy"],
+        accepted_params=[
+            "failure_policy",
+            "left_strength",
+            "right_strength",
+            "tie_policy",
+            "enable_follow_through",
+        ],
         min_history=3,
         implementation="breakout_behavior",
     )
