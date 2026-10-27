@@ -1,4 +1,4 @@
-"""Phase 6D — source-aware breakout behavior and failure lifecycle."""
+"""Phase 6D/6E — source-aware breakout behavior, failure lifecycle, and optional follow-through."""
 
 from __future__ import annotations
 
@@ -35,6 +35,14 @@ def _validate_failure_policy(value: Any) -> str:
     return value
 
 
+def _validate_enable_follow_through(value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"enable_follow_through must be a bool, got {type(value).__name__}: {value!r}"
+        )
+    return value
+
+
 def _finite_number(value: Any) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -55,6 +63,7 @@ def _stable_breakout_id(
     detector_id: str,
     detector_config_id: str,
     failure_policy: str,
+    originating_breakout_id: Optional[str] = None,
 ) -> str:
     """Stable source-aware identity; Observation.create omits source IDs."""
     identity = {
@@ -70,6 +79,8 @@ def _stable_breakout_id(
         "detector_config_id": detector_config_id,
         "failure_policy": failure_policy,
     }
+    if originating_breakout_id is not None:
+        identity["originating_breakout_id"] = originating_breakout_id
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return "breakout:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
 
@@ -80,6 +91,12 @@ class BreakoutBehaviorDetector(PriceActionDetector):
     A source becomes eligible only on candles strictly later than its
     confirmed_at epoch. Gaps and invalid OHLC candles split history into
     independent segments; lifecycle state never crosses a segment boundary.
+
+    Phase 6E (opt-in): when enable_follow_through is True, emit at most one
+    breakout_follow_through per originating breakout_confirmed after a later
+    completed candle closes strictly beyond the confirmation candle's high
+    (bullish) or low (bearish). Failure policies are unchanged; follow-through
+    does not terminate the lifecycle.
     """
 
     def __init__(
@@ -89,6 +106,7 @@ class BreakoutBehaviorDetector(PriceActionDetector):
         left_strength: int = 1,
         right_strength: int = 1,
         tie_policy: str = "strict",
+        enable_follow_through: bool = False,
         detector_id: str = "breakout_behavior",
         detector_config_id: Optional[str] = None,
     ) -> None:
@@ -96,6 +114,7 @@ class BreakoutBehaviorDetector(PriceActionDetector):
         self._left = _validate_strength("left_strength", left_strength)
         self._right = _validate_strength("right_strength", right_strength)
         self._tie_policy = _validate_tie_policy(tie_policy)
+        self._enable_follow_through = _validate_enable_follow_through(enable_follow_through)
         self._detector_id = detector_id
         self._swing = SwingPivotDetector(
             left_strength=self._left,
@@ -131,12 +150,17 @@ class BreakoutBehaviorDetector(PriceActionDetector):
         return self._left + 1 + self._right
 
     def config_dict(self) -> dict[str, Any]:
-        return {
+        # Omit enable_follow_through when False so default Phase 6D
+        # configuration identity is unchanged.
+        cfg: dict[str, Any] = {
             "failure_policy": self._failure_policy,
             "left_strength": self._left,
             "right_strength": self._right,
             "tie_policy": self._tie_policy,
         }
+        if self._enable_follow_through:
+            cfg["enable_follow_through"] = True
+        return cfg
 
     def detect(self, candles: list[Candle]) -> list[Observation]:
         closed = [c for c in candles if c.is_closed]
@@ -174,12 +198,12 @@ class BreakoutBehaviorDetector(PriceActionDetector):
             segments.append(current)
         return segments
 
-    def _reconstruct(self, closed: list[Candle]) -> list[Observation]:
-        if not closed:
+    def _reconstruct(self, candles: list[Candle]) -> list[Observation]:
+        if not candles:
             return []
-        symbol = closed[0].symbol
-        timeframe = closed[0].timeframe
-        if any(c.symbol != symbol or c.timeframe != timeframe for c in closed):
+        symbol = candles[0].symbol
+        timeframe = candles[0].timeframe
+        if any(c.symbol != symbol or c.timeframe != timeframe for c in candles):
             logger.debug("Mixed symbol/timeframe; skipping breakout detection")
             return []
         step = timeframe_seconds(timeframe)
@@ -188,7 +212,7 @@ class BreakoutBehaviorDetector(PriceActionDetector):
             return []
 
         output: list[Observation] = []
-        for segment in self._segments(closed, step):
+        for segment in self._segments(candles, step):
             if len(segment) < self.min_history:
                 continue
             swings = self._swing.detect_all_historical(segment)
@@ -251,6 +275,9 @@ class BreakoutBehaviorDetector(PriceActionDetector):
         output: list[Observation] = []
         active = False
         pending_failure = False
+        confirmation_candle: Optional[Candle] = None
+        confirmed_breakout_id: Optional[str] = None
+        follow_through_emitted = False
 
         for candle in candles:
             # Strict causality: the source-confirming candle itself is ineligible.
@@ -262,16 +289,25 @@ class BreakoutBehaviorDetector(PriceActionDetector):
             if not active:
                 if beyond:
                     active = True
-                    output.append(self._make_event(
+                    confirmation_candle = candle
+                    event = self._make_event(
                         candle=candle,
                         event_type="breakout_confirmed",
                         source=source,
                         source_family=source_family,
                         boundary=boundary,
                         direction=direction,
-                    ))
+                    )
+                    confirmed_breakout_id = event.id
+                    output.append(event)
                 continue
 
+            # Deterministic order on every completed candle while active:
+            # 1) failure (existing policies) — if it fires, no follow-through
+            #    is emitted afterward for this breakout.
+            # 2) follow-through (opt-in) — only when still active and not yet
+            #    emitted; does not terminate the lifecycle.
+            failed_this_candle = False
             if self._failure_policy == "close_back_across":
                 if back_across:
                     output.append(self._make_event(
@@ -281,8 +317,9 @@ class BreakoutBehaviorDetector(PriceActionDetector):
                         source_family=source_family,
                         boundary=boundary,
                         direction=direction,
+                        originating_breakout_id=confirmed_breakout_id,
                     ))
-                    break
+                    failed_this_candle = True
             elif pending_failure:
                 # Only the immediately following eligible completed candle counts.
                 if back_across:
@@ -293,12 +330,43 @@ class BreakoutBehaviorDetector(PriceActionDetector):
                         source_family=source_family,
                         boundary=boundary,
                         direction=direction,
+                        originating_breakout_id=confirmed_breakout_id,
                     ))
-                    break
-                # Equality or reclaim of the breakout side resets the pending state.
-                pending_failure = False
+                    failed_this_candle = True
+                else:
+                    # Equality or reclaim of the breakout side resets the pending state.
+                    pending_failure = False
             elif back_across:
                 pending_failure = True
+
+            if failed_this_candle:
+                break
+
+            if (
+                self._enable_follow_through
+                and not follow_through_emitted
+                and confirmation_candle is not None
+                and confirmed_breakout_id is not None
+                and candle.epoch > confirmation_candle.epoch
+            ):
+                if direction == "bullish":
+                    qualifies = candle.close > confirmation_candle.high
+                else:
+                    qualifies = candle.close < confirmation_candle.low
+                if qualifies:
+                    output.append(self._make_event(
+                        candle=candle,
+                        event_type="breakout_follow_through",
+                        source=source,
+                        source_family=source_family,
+                        boundary=boundary,
+                        direction=direction,
+                        originating_breakout_id=confirmed_breakout_id,
+                        confirmation_high=confirmation_candle.high,
+                        confirmation_low=confirmation_candle.low,
+                    ))
+                    follow_through_emitted = True
+
         return output
 
     def _make_event(
@@ -310,8 +378,22 @@ class BreakoutBehaviorDetector(PriceActionDetector):
         source_family: str,
         boundary: float,
         direction: str,
+        originating_breakout_id: Optional[str] = None,
+        confirmation_high: Optional[float] = None,
+        confirmation_low: Optional[float] = None,
     ) -> Observation:
-        payload = {
+        if event_type == "breakout_confirmed":
+            lifecycle_event = "confirmation"
+            lifecycle_state = "active"
+        elif event_type == "breakout_failed":
+            lifecycle_event = "failure"
+            lifecycle_state = "failed"
+        else:
+            # follow-through does not change lifecycle state
+            lifecycle_event = "follow_through"
+            lifecycle_state = "active"
+
+        payload: dict[str, Any] = {
             "event_type": event_type,
             "source_id": source.id,
             "source_family": source_family,
@@ -321,9 +403,17 @@ class BreakoutBehaviorDetector(PriceActionDetector):
             "boundary": boundary,
             "direction": direction,
             "failure_policy": self._failure_policy,
-            "lifecycle_event": "confirmation" if event_type == "breakout_confirmed" else "failure",
-            "lifecycle_state": "active" if event_type == "breakout_confirmed" else "failed",
+            "lifecycle_event": lifecycle_event,
+            "lifecycle_state": lifecycle_state,
+            "enable_follow_through": self._enable_follow_through,
         }
+        if originating_breakout_id is not None:
+            payload["originating_breakout_id"] = originating_breakout_id
+        if confirmation_high is not None:
+            payload["confirmation_high"] = confirmation_high
+        if confirmation_low is not None:
+            payload["confirmation_low"] = confirmation_low
+
         event_id = _stable_breakout_id(
             symbol=candle.symbol,
             timeframe=candle.timeframe,
@@ -336,7 +426,13 @@ class BreakoutBehaviorDetector(PriceActionDetector):
             detector_id=self._detector_id,
             detector_config_id=self._detector_config_id,
             failure_policy=self._failure_policy,
+            originating_breakout_id=originating_breakout_id,
         )
+        if originating_breakout_id is not None:
+            ref_ids = (source.id, originating_breakout_id)
+        else:
+            ref_ids = (source.id,)
+
         return Observation.create(
             type="breakout_behavior",
             symbol=candle.symbol,
@@ -349,8 +445,8 @@ class BreakoutBehaviorDetector(PriceActionDetector):
             variant=event_type,
             detector_id=self._detector_id,
             detector_config_id=self._detector_config_id,
-            reference_ids=(source.id,),
-            lifecycle_state="active" if event_type == "breakout_confirmed" else "failed",
+            reference_ids=ref_ids,
+            lifecycle_state=lifecycle_state,
             payload=payload,
             metadata=payload,
             id=event_id,
