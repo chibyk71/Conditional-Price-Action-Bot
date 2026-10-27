@@ -748,3 +748,50 @@ def test_nested_then_rejected_by_validation():
         }
     )
     assert isinstance(expr, ThenExpression)
+
+
+def test_leaf_no_qualify_without_evaluation_context(ev: ExpressionEvaluator):
+    expr = ObservationRequirement(type="a")
+    r = ev.evaluate(
+        expr,
+        [_obs("a", 100, oid="a1")],
+        symbol=SYMBOL,
+        timeframe=TF,
+        # omit candle_epoch and evaluation_time
+    )
+    assert r.qualified is False
+    assert any("evaluation context" in x for x in r.reasons)
+
+
+def test_and_no_qualify_without_evaluation_context(ev: ExpressionEvaluator):
+    expr = AndExpression(
+        children=(
+            ObservationRequirement(type="a"),
+            ObservationRequirement(type="b"),
+        )
+    )
+    r = ev.evaluate(
+        expr,
+        [_obs("a", 100, oid="a1"), _obs("b", 100, oid="b1")],
+        symbol=SYMBOL,
+        timeframe=TF,
+    )
+    assert r.qualified is False
+    assert any("evaluation context" in x for x in r.reasons)
+
+
+def test_or_no_qualify_without_evaluation_context(ev: ExpressionEvaluator):
+    expr = OrExpression(
+        children=(
+            ObservationRequirement(type="a"),
+            ObservationRequirement(type="b"),
+        )
+    )
+    r = ev.evaluate(
+        expr,
+        [_obs("a", 100, oid="a1")],
+        symbol=SYMBOL,
+        timeframe=TF,
+    )
+    assert r.qualified is False
+    assert any("evaluation context" in x for x in r.reasons)

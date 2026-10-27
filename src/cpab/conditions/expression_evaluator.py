@@ -192,12 +192,38 @@ class ExpressionEvaluator:
                 progress=progress or ThenProgress(),
             )
 
+        # Non-THEN expressions require a current evaluation event so prior
+        # confirmed observations alone cannot activate the condition repeatedly.
+        # Fail closed when both evaluation_time and candle_epoch are omitted.
+        if T is None:
+            reasons = (
+                "evaluation context required (evaluation_time or candle_epoch); "
+                "prior evidence alone cannot activate leaf/AND/OR without a "
+                "current evaluation event",
+            )
+            return ExpressionEvalResult(
+                qualified=False,
+                reasons=reasons,
+                evidence=(),
+                provenance=BranchProvenance(
+                    path="expression",
+                    qualified=False,
+                    reasons=reasons,
+                ),
+                progress=None,
+                advanced=False,
+                symbol=symbol,
+                timeframe=timeframe,
+                evaluation_time=None,
+                candle_epoch=candle_epoch,
+            )
+
         prov, qualified, evidence, reasons = self._eval_node(
             expression,
             obs_list,
             path="expression",
             T=T,
-            require_activation=(T is not None),
+            require_activation=True,
             committed_ids=frozenset(),
         )
         return ExpressionEvalResult(
