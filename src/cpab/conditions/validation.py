@@ -247,6 +247,14 @@ def _parse_then(
                 path=f"{step_path}.allow_same_candle",
                 setup_id=setup_id,
             )
+        # First step has no predecessor; same-candle is meaningless there.
+        if i == 0 and allow_same is True:
+            raise SetupValidationError(
+                "allow_same_candle cannot be true on the first THEN step "
+                "(no preceding step to share a candle with)",
+                path=f"{step_path}.allow_same_candle",
+                setup_id=setup_id,
+            )
         expr_data = {k: v for k, v in step_data.items() if k != "allow_same_candle"}
         expr = parse_expression(
             expr_data,
@@ -279,6 +287,14 @@ def parse_setup(raw: Any, *, index: Optional[int] = None) -> SetupDef:
             setup_id=early_id,
         )
     schema_version = data["schema_version"]
+    # Reject bool/float/str before == 1 (True == 1 and 1.0 == 1 in Python).
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        raise SetupValidationError(
+            f"schema_version must be an integer, got {schema_version!r} "
+            f"({type(schema_version).__name__})",
+            path=f"{path_prefix}.schema_version",
+            setup_id=early_id,
+        )
     if schema_version != SCHEMA_VERSION_V1:
         raise SetupValidationError(
             f"unsupported schema_version {schema_version!r}; only {SCHEMA_VERSION_V1} is supported",
