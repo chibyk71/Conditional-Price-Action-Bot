@@ -1026,3 +1026,65 @@ def test_and_or_activation_continues_past_prior_only_assignment(ev: ExpressionEv
         candle_epoch=100,
     )
     assert r_prior.qualified is False
+
+
+def test_and_or_success_preserves_selected_branch_provenance(ev: ExpressionEvaluator):
+    """Successful AND(OR(a,b), c) provenance identifies the selected OR branch."""
+    expr = AndExpression(
+        children=(
+            OrExpression(
+                children=(
+                    ObservationRequirement(type="a"),
+                    ObservationRequirement(type="b"),
+                )
+            ),
+            ObservationRequirement(type="c"),
+        )
+    )
+    # Force second OR branch via activation search
+    obs = [
+        _obs("a", 50, confirmed_at=50, oid="a_prior"),
+        _obs("b", 100, confirmed_at=100, oid="b_new"),
+        _obs("c", 60, confirmed_at=60, oid="c_prior"),
+    ]
+    r = ev.evaluate(expr, obs, symbol=SYMBOL, timeframe=TF, candle_epoch=100)
+    assert r.qualified is True
+    assert r.provenance is not None
+    assert len(r.provenance.child_provenances) == 2
+    or_prov = r.provenance.child_provenances[0]
+    leaf_c = r.provenance.child_provenances[1]
+    assert "OR satisfied by child[1]" in " ".join(or_prov.reasons)
+    assert any(e.observation_id == "b_new" for e in or_prov.evidence) or any(
+        e.observation_id == "b_new" for e in r.evidence
+    )
+    assert any(e.observation_id == "c_prior" for e in leaf_c.evidence)
+
+
+def test_then_commits_and_or_branch_provenance(ev: ExpressionEvaluator):
+    """THEN step committing AND(OR(...)) retains selected branch in step.branch."""
+    step_expr = AndExpression(
+        children=(
+            OrExpression(
+                children=(
+                    ObservationRequirement(type="a"),
+                    ObservationRequirement(type="b"),
+                )
+            ),
+            ObservationRequirement(type="c"),
+        )
+    )
+    expr = ThenExpression(steps=(ThenStep(expression=step_expr),))
+    obs = [
+        _obs("b", 100, confirmed_at=100, oid="b_new"),
+        _obs("c", 100, confirmed_at=100, oid="c_new"),
+    ]
+    r = ev.evaluate(expr, obs, symbol=SYMBOL, timeframe=TF, candle_epoch=100)
+    assert r.advanced is True
+    assert r.progress is not None and r.progress.completed is True
+    step = r.progress.committed_steps[0]
+    assert step.branch is not None
+    assert len(step.branch.child_provenances) == 2
+    or_prov = step.branch.child_provenances[0]
+    assert "OR satisfied by child[0]" in " ".join(or_prov.reasons) or "OR satisfied by child[1]" in " ".join(
+        or_prov.reasons
+    )

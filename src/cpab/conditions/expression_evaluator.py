@@ -513,6 +513,23 @@ class ExpressionEvaluator:
         combos.sort(key=_combo_key)
         return combos
 
+    def _flatten_evidence(self, prov: BranchProvenance) -> list[EvidenceItem]:
+        """Flatten evidence from a provenance tree in stable depth-first order."""
+        out: list[EvidenceItem] = []
+        if prov.child_provenances:
+            for child in prov.child_provenances:
+                out.extend(self._flatten_evidence(child))
+        else:
+            out.extend(prov.evidence)
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        deduped: list[EvidenceItem] = []
+        for e in out:
+            if e.observation_id not in seen:
+                seen.add(e.observation_id)
+                deduped.append(e)
+        return deduped
+
     def _iter_assignments(
         self,
         expression: Expression,
@@ -523,12 +540,14 @@ class ExpressionEvaluator:
         used_ids: frozenset[str],
         prefer_activation: bool,
     ):
-        """Yield every valid distinct-evidence assignment for an expression subtree.
+        """Yield BranchProvenance for every valid assignment of an expression subtree.
 
         Nested AND assignments are fully enumerated so an outer sibling can force
         an alternative when the first nested choice conflicts. OR children are
         tried in declared order; assignments from earlier branches are yielded
         before later ones (first global success prefers earlier branches).
+        Successful OR provenance records the selected branch index in path and
+        child_provenances.
         """
         if isinstance(expression, ObservationRequirement):
             for combo in self._leaf_choice_sets(
@@ -538,9 +557,16 @@ class ExpressionEvaluator:
                 used_ids=used_ids,
                 prefer_activation=prefer_activation,
             ):
-                yield [
+                ev = [
                     EvidenceItem.from_observation(o, evaluation_time=T) for o in combo
                 ]
+                ids = ",".join(e.observation_id for e in ev)
+                yield BranchProvenance(
+                    path=path,
+                    qualified=True,
+                    evidence=tuple(ev),
+                    reasons=(f"{path}: assigned evidence [{ids}]",),
+                )
             return
 
         if isinstance(expression, AndExpression):
@@ -560,14 +586,23 @@ class ExpressionEvaluator:
             # branches without forbidding later branches when earlier ones cannot
             # complete a joint outer AND.
             for i, child in enumerate(expression.children):
-                yield from self._iter_assignments(
+                child_path = f"{path}.or[{i}]"
+                for child_prov in self._iter_assignments(
                     child,
                     obs_list,
-                    path=f"{path}.or[{i}]",
+                    path=child_path,
                     T=T,
                     used_ids=used_ids,
                     prefer_activation=prefer_activation,
-                )
+                ):
+                    yield BranchProvenance(
+                        path=path,
+                        qualified=True,
+                        evidence=child_prov.evidence,
+                        child_provenances=(child_prov,),
+                        reasons=(f"{path}: OR satisfied by child[{i}]",)
+                        + child_prov.reasons,
+                    )
             return
 
         # Nested THEN unsupported under AND/OR
@@ -615,9 +650,10 @@ class ExpressionEvaluator:
         used_ids: frozenset[str],
         prefer_activation: bool,
     ):
-        """Yield each valid assignment of distinct evidence across AND children.
+        """Yield BranchProvenance for each valid AND assignment.
 
         Search order is ranked by constraint tightness (not declaration order).
+        child_provenances on the result are always in declared child order.
         Nested composites yield alternative assignments so outer siblings can
         force reconsideration when the first nested choice conflicts.
         """
@@ -628,20 +664,33 @@ class ExpressionEvaluator:
                 i, children[i], obs_list, T=T, used_ids=used_ids
             ),
         )
-        assignment: dict[int, list[EvidenceItem]] = {}
+        assignment: dict[int, BranchProvenance] = {}
 
         def search(pos: int, current_used: frozenset[str]):
             if pos >= len(order):
-                out: list[EvidenceItem] = []
-                for i in range(n):
-                    out.extend(assignment[i])
-                yield out
+                child_provs = tuple(assignment[i] for i in range(n))
+                flat: list[EvidenceItem] = []
+                for cp in child_provs:
+                    flat.extend(self._flatten_evidence(cp))
+                seen: set[str] = set()
+                deduped: list[EvidenceItem] = []
+                for e in flat:
+                    if e.observation_id not in seen:
+                        seen.add(e.observation_id)
+                        deduped.append(e)
+                yield BranchProvenance(
+                    path=path,
+                    qualified=True,
+                    evidence=tuple(deduped),
+                    child_provenances=child_provs,
+                    reasons=(f"{path}: AND satisfied",),
+                )
                 return
             i = order[pos]
             child = children[i]
             child_path = f"{path}.and[{i}]"
 
-            for ev in self._iter_assignments(
+            for child_prov in self._iter_assignments(
                 child,
                 obs_list,
                 path=child_path,
@@ -649,8 +698,10 @@ class ExpressionEvaluator:
                 used_ids=current_used,
                 prefer_activation=prefer_activation,
             ):
-                assignment[i] = ev
-                new_used = current_used | {e.observation_id for e in ev}
+                assignment[i] = child_prov
+                new_used = current_used | {
+                    e.observation_id for e in self._flatten_evidence(child_prov)
+                }
                 yield from search(pos + 1, frozenset(new_used))
                 del assignment[i]
 
@@ -666,8 +717,8 @@ class ExpressionEvaluator:
         used_ids: frozenset[str],
         prefer_activation: bool,
         require_activation: bool = False,
-    ) -> Optional[list[EvidenceItem]]:
-        """Return the first valid AND assignment satisfying activation when required.
+    ) -> Optional[BranchProvenance]:
+        """Return the first valid AND provenance satisfying activation when required.
 
         Continues through generator alternatives so a prior-only first assignment
         does not block a later assignment that includes current-event evidence.
@@ -675,7 +726,7 @@ class ExpressionEvaluator:
         preserved because earlier OR branches are yielded first.
         """
         need_activation = require_activation and T is not None
-        for assigned in self._iter_and_assignments(
+        for prov in self._iter_and_assignments(
             children,
             obs_list,
             path=path,
@@ -683,9 +734,9 @@ class ExpressionEvaluator:
             used_ids=used_ids,
             prefer_activation=prefer_activation,
         ):
-            if need_activation and not any(e.is_activation for e in assigned):
+            if need_activation and not any(e.is_activation for e in prov.evidence):
                 continue
-            return assigned
+            return prov
         return None
 
     def _eval_and(
@@ -704,11 +755,11 @@ class ExpressionEvaluator:
         Finds a valid assignment of distinct observations across children
         (including nested AND/OR) when one exists. When activation is required,
         continues search until an assignment includes current-event evidence.
-        Search order is independent of declaration order; provenance is reported
-        in declared child order.
+        Successful provenance includes child_provenances in declared order,
+        including which OR branch was selected under nested OR children.
         """
         prefer = (require_activation or prefer_activation) and T is not None
-        assigned = self._assign_and_children(
+        assigned_prov = self._assign_and_children(
             expr.children,
             obs_list,
             path=path,
@@ -718,7 +769,7 @@ class ExpressionEvaluator:
             require_activation=require_activation,
         )
 
-        if assigned is None:
+        if assigned_prov is None:
             # Diagnostic: independent eligibility failure messages
             reasons: list[str] = []
             child_provs: list[BranchProvenance] = []
@@ -752,23 +803,8 @@ class ExpressionEvaluator:
             )
             return prov, False, [], reasons
 
-        # Build per-child provenance in declaration order via re-partition is hard
-        # after flattening; report combined evidence with path-level provenance.
-        seen: set[str] = set()
-        deduped: list[EvidenceItem] = []
-        for e in assigned:
-            if e.observation_id not in seen:
-                seen.add(e.observation_id)
-                deduped.append(e)
-
-        reasons = [f"{path}: AND satisfied"]
-        prov = BranchProvenance(
-            path=path,
-            qualified=True,
-            evidence=tuple(deduped),
-            reasons=tuple(reasons),
-        )
-        return prov, True, deduped, reasons
+        evidence = list(assigned_prov.evidence)
+        return assigned_prov, True, evidence, list(assigned_prov.reasons)
 
     def _eval_or(
         self,
