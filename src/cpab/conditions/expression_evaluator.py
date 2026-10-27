@@ -513,7 +513,7 @@ class ExpressionEvaluator:
         combos.sort(key=_combo_key)
         return combos
 
-    def _assign_expression(
+    def _iter_assignments(
         self,
         expression: Expression,
         obs_list: Sequence[Observation],
@@ -522,11 +522,13 @@ class ExpressionEvaluator:
         T: Optional[int],
         used_ids: frozenset[str],
         prefer_activation: bool,
-    ) -> Optional[list[EvidenceItem]]:
-        """Try to assign distinct evidence for an expression subtree.
+    ):
+        """Yield every valid distinct-evidence assignment for an expression subtree.
 
-        Returns evidence list on success, None on failure. Uses backtracking so a
-        valid global assignment is found when one exists across nested AND/OR.
+        Nested AND assignments are fully enumerated so an outer sibling can force
+        an alternative when the first nested choice conflicts. OR children are
+        tried in declared order; assignments from earlier branches are yielded
+        before later ones (first global success prefers earlier branches).
         """
         if isinstance(expression, ObservationRequirement):
             for combo in self._leaf_choice_sets(
@@ -536,13 +538,13 @@ class ExpressionEvaluator:
                 used_ids=used_ids,
                 prefer_activation=prefer_activation,
             ):
-                return [
+                yield [
                     EvidenceItem.from_observation(o, evaluation_time=T) for o in combo
                 ]
-            return None
+            return
 
         if isinstance(expression, AndExpression):
-            result = self._assign_and_children(
+            yield from self._iter_and_assignments(
                 expression.children,
                 obs_list,
                 path=path,
@@ -550,12 +552,15 @@ class ExpressionEvaluator:
                 used_ids=used_ids,
                 prefer_activation=prefer_activation,
             )
-            return result
+            return
 
         if isinstance(expression, OrExpression):
-            # Declared order: first branch that can be assigned wins.
+            # Declared order: exhaust earlier branches' assignments before later
+            # ones so the first successful global allocation prefers earlier
+            # branches without forbidding later branches when earlier ones cannot
+            # complete a joint outer AND.
             for i, child in enumerate(expression.children):
-                assigned = self._assign_expression(
+                yield from self._iter_assignments(
                     child,
                     obs_list,
                     path=f"{path}.or[{i}]",
@@ -563,12 +568,10 @@ class ExpressionEvaluator:
                     used_ids=used_ids,
                     prefer_activation=prefer_activation,
                 )
-                if assigned is not None:
-                    return assigned
-            return None
+            return
 
         # Nested THEN unsupported under AND/OR
-        return None
+        return
 
     def _child_rank_key(
         self,
@@ -602,7 +605,7 @@ class ExpressionEvaluator:
             return (0, 0, len(child.children), "OrExpression", "", index)
         return (9, 0, 0, type(child).__name__, "", index)
 
-    def _assign_and_children(
+    def _iter_and_assignments(
         self,
         children: Sequence[Expression],
         obs_list: Sequence[Observation],
@@ -611,12 +614,12 @@ class ExpressionEvaluator:
         T: Optional[int],
         used_ids: frozenset[str],
         prefer_activation: bool,
-    ) -> Optional[list[EvidenceItem]]:
-        """Backtracking assignment of distinct evidence across AND children.
+    ):
+        """Yield each valid assignment of distinct evidence across AND children.
 
-        Search order is ranked by constraint tightness (not declaration order) so
-        qualification does not depend on child order. Nested composites are
-        assigned recursively so outer broad leaves cannot starve nested needs.
+        Search order is ranked by constraint tightness (not declaration order).
+        Nested composites yield alternative assignments so outer siblings can
+        force reconsideration when the first nested choice conflicts.
         """
         n = len(children)
         order = sorted(
@@ -627,58 +630,53 @@ class ExpressionEvaluator:
         )
         assignment: dict[int, list[EvidenceItem]] = {}
 
-        def search(pos: int, current_used: frozenset[str]) -> bool:
+        def search(pos: int, current_used: frozenset[str]):
             if pos >= len(order):
-                return True
+                out: list[EvidenceItem] = []
+                for i in range(n):
+                    out.extend(assignment[i])
+                yield out
+                return
             i = order[pos]
             child = children[i]
             child_path = f"{path}.and[{i}]"
 
-            if isinstance(child, ObservationRequirement):
-                choices = self._leaf_choice_sets(
-                    child,
-                    obs_list,
-                    T=T,
-                    used_ids=current_used,
-                    prefer_activation=prefer_activation,
-                )
-                for combo in choices:
-                    ev = [
-                        EvidenceItem.from_observation(o, evaluation_time=T)
-                        for o in combo
-                    ]
-                    new_used = current_used | {e.observation_id for e in ev}
-                    assignment[i] = ev
-                    if search(pos + 1, frozenset(new_used)):
-                        return True
-                    del assignment[i]
-                return False
-
-            # Nested composite: try one full assignment for the subtree.
-            assigned = self._assign_expression(
+            for ev in self._iter_assignments(
                 child,
                 obs_list,
                 path=child_path,
                 T=T,
                 used_ids=current_used,
                 prefer_activation=prefer_activation,
-            )
-            if assigned is None:
-                return False
-            assignment[i] = assigned
-            new_used = current_used | {e.observation_id for e in assigned}
-            if search(pos + 1, frozenset(new_used)):
-                return True
-            del assignment[i]
-            return False
+            ):
+                assignment[i] = ev
+                new_used = current_used | {e.observation_id for e in ev}
+                yield from search(pos + 1, frozenset(new_used))
+                del assignment[i]
 
-        if not search(0, used_ids):
-            return None
-        # Flatten in declaration order for stable provenance.
-        out: list[EvidenceItem] = []
-        for i in range(n):
-            out.extend(assignment[i])
-        return out
+        yield from search(0, used_ids)
+
+    def _assign_and_children(
+        self,
+        children: Sequence[Expression],
+        obs_list: Sequence[Observation],
+        *,
+        path: str,
+        T: Optional[int],
+        used_ids: frozenset[str],
+        prefer_activation: bool,
+    ) -> Optional[list[EvidenceItem]]:
+        """Return the first valid AND assignment, or None."""
+        for assigned in self._iter_and_assignments(
+            children,
+            obs_list,
+            path=path,
+            T=T,
+            used_ids=used_ids,
+            prefer_activation=prefer_activation,
+        ):
+            return assigned
+        return None
 
     def _eval_and(
         self,

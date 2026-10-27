@@ -892,3 +892,95 @@ def test_and_broad_leaf_does_not_starve_nested_and(ev: ExpressionEvaluator):
             assert "y_prior" in ids
             assert "x_hl" in ids
             assert any(e.is_activation for e in r.evidence)
+
+
+def test_nested_and_does_not_starve_outer_specific_leaf(ev: ExpressionEvaluator):
+    """Outer x/hh + nested AND(x any, y) must reconsider nested assignment.
+
+    Valid: outer takes x/hh (activation); nested takes x/hl + y.
+    Nested prefers activation first but outer backtracking forces the alternative.
+    """
+    nested = AndExpression(
+        children=(
+            ObservationRequirement(type="x"),
+            ObservationRequirement(type="y"),
+        )
+    )
+    expr_specific_first = AndExpression(
+        children=(
+            ObservationRequirement(type="x", variant="hh"),
+            nested,
+        )
+    )
+    expr_nested_first = AndExpression(
+        children=(
+            nested,
+            ObservationRequirement(type="x", variant="hh"),
+        )
+    )
+    x_hh = _obs("x", 100, variant="hh", confirmed_at=100, oid="x_hh")
+    x_hl = _obs("x", 50, variant="hl", confirmed_at=50, oid="x_hl")
+    y_prior = _obs("y", 60, confirmed_at=60, oid="y_prior")
+
+    for expr in (expr_specific_first, expr_nested_first):
+        for order in (
+            [x_hh, x_hl, y_prior],
+            [y_prior, x_hl, x_hh],
+            [x_hl, y_prior, x_hh],
+            [x_hh, y_prior, x_hl],
+        ):
+            r = ev.evaluate(expr, order, symbol=SYMBOL, timeframe=TF, candle_epoch=100)
+            assert r.qualified is True, (expr, [o.id for o in order], r.reasons)
+            ids = {e.observation_id for e in r.evidence}
+            assert ids == {"x_hh", "x_hl", "y_prior"}, ids
+            assert any(e.is_activation and e.observation_id == "x_hh" for e in r.evidence)
+
+
+def test_nested_or_preserves_declared_branch_order(ev: ExpressionEvaluator):
+    """Under outer AND, nested OR prefers the first declared branch when both work."""
+    # AND(OR(a, b), c) with both a and b available + c — should use a (first branch)
+    expr = AndExpression(
+        children=(
+            OrExpression(
+                children=(
+                    ObservationRequirement(type="a"),
+                    ObservationRequirement(type="b"),
+                )
+            ),
+            ObservationRequirement(type="c"),
+        )
+    )
+    obs = [
+        _obs("a", 100, confirmed_at=100, oid="a1"),
+        _obs("b", 100, confirmed_at=100, oid="b1"),
+        _obs("c", 50, confirmed_at=50, oid="c1"),
+    ]
+    r = ev.evaluate(expr, obs, symbol=SYMBOL, timeframe=TF, candle_epoch=100)
+    assert r.qualified is True, r.reasons
+    ids = {e.observation_id for e in r.evidence}
+    assert "a1" in ids
+    assert "c1" in ids
+    assert "b1" not in ids
+
+    # When only second OR branch works with outer (first branch starved):
+    # AND(OR(a, b), a) with one a and one b — first branch takes a, outer fails;
+    # must try second branch (b) so outer can take a.
+    expr2 = AndExpression(
+        children=(
+            OrExpression(
+                children=(
+                    ObservationRequirement(type="a"),
+                    ObservationRequirement(type="b"),
+                )
+            ),
+            ObservationRequirement(type="a"),
+        )
+    )
+    obs2 = [
+        _obs("a", 100, confirmed_at=100, oid="a1"),
+        _obs("b", 90, confirmed_at=90, oid="b1"),
+    ]
+    r2 = ev.evaluate(expr2, obs2, symbol=SYMBOL, timeframe=TF, candle_epoch=100)
+    assert r2.qualified is True, r2.reasons
+    ids2 = {e.observation_id for e in r2.evidence}
+    assert ids2 == {"a1", "b1"}
