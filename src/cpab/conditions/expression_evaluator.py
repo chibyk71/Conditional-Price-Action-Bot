@@ -56,6 +56,50 @@ class BranchProvenance:
     child_provenances: tuple["BranchProvenance", ...] = ()
     reasons: tuple[str, ...] = ()
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "qualified": self.qualified,
+            "evidence": [_evidence_to_dict(e) for e in self.evidence],
+            "child_provenances": [c.to_dict() for c in self.child_provenances],
+            "reasons": list(self.reasons),
+        }
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "BranchProvenance":
+        return BranchProvenance(
+            path=str(data["path"]),
+            qualified=bool(data["qualified"]),
+            evidence=tuple(
+                _evidence_from_dict(e) for e in data.get("evidence", []) or []
+            ),
+            child_provenances=tuple(
+                BranchProvenance.from_dict(c)
+                for c in data.get("child_provenances", []) or []
+            ),
+            reasons=tuple(data.get("reasons", []) or []),
+        )
+
+
+def _evidence_to_dict(e: EvidenceItem) -> dict[str, Any]:
+    return {
+        "observation_id": e.observation_id,
+        "observation_type": e.observation_type,
+        "confirmation_time": e.confirmation_time,
+        "candle_epoch": e.candle_epoch,
+        "is_activation": e.is_activation,
+    }
+
+
+def _evidence_from_dict(data: dict[str, Any]) -> EvidenceItem:
+    return EvidenceItem(
+        observation_id=str(data["observation_id"]),
+        observation_type=str(data["observation_type"]),
+        confirmation_time=data.get("confirmation_time"),
+        candle_epoch=int(data["candle_epoch"]),
+        is_activation=bool(data.get("is_activation", False)),
+    )
+
 
 @dataclass(frozen=True)
 class ThenStepProvenance:
@@ -67,12 +111,44 @@ class ThenStepProvenance:
     evidence: tuple[EvidenceItem, ...]
     branch: Optional[BranchProvenance] = None
 
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "step_index": self.step_index,
+            "evaluation_candle": self.evaluation_candle,
+            "confirmation_time": self.confirmation_time,
+            "evidence": [_evidence_to_dict(e) for e in self.evidence],
+        }
+        if self.branch is not None:
+            d["branch"] = self.branch.to_dict()
+        else:
+            d["branch"] = None
+        return d
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "ThenStepProvenance":
+        branch_raw = data.get("branch")
+        return ThenStepProvenance(
+            step_index=int(data["step_index"]),
+            evaluation_candle=int(data["evaluation_candle"]),
+            confirmation_time=data.get("confirmation_time"),
+            evidence=tuple(
+                _evidence_from_dict(e) for e in data.get("evidence", []) or []
+            ),
+            branch=(
+                BranchProvenance.from_dict(branch_raw)
+                if isinstance(branch_raw, dict)
+                else None
+            ),
+        )
+
 
 @dataclass(frozen=True)
 class ThenProgress:
     """Explicit, minimal caller-supplied / evaluator-returned THEN sequence state.
 
     Pure evaluator state — no persistence or lifecycle management.
+    Serialization via to_dict/from_dict preserves committed step branch
+    provenance for audit and rehydration.
     """
 
     next_step_index: int = 0
@@ -84,28 +160,28 @@ class ThenProgress:
     def to_dict(self) -> dict[str, Any]:
         return {
             "next_step_index": self.next_step_index,
-            "committed_steps": [
-                {
-                    "step_index": s.step_index,
-                    "evaluation_candle": s.evaluation_candle,
-                    "confirmation_time": s.confirmation_time,
-                    "evidence": [
-                        {
-                            "observation_id": e.observation_id,
-                            "observation_type": e.observation_type,
-                            "confirmation_time": e.confirmation_time,
-                            "candle_epoch": e.candle_epoch,
-                            "is_activation": e.is_activation,
-                        }
-                        for e in s.evidence
-                    ],
-                }
-                for s in self.committed_steps
-            ],
+            "committed_steps": [s.to_dict() for s in self.committed_steps],
             "last_qualifying_evaluation_candle": self.last_qualifying_evaluation_candle,
             "last_qualifying_confirmation_time": self.last_qualifying_confirmation_time,
             "completed": self.completed,
         }
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "ThenProgress":
+        return ThenProgress(
+            next_step_index=int(data.get("next_step_index", 0)),
+            committed_steps=tuple(
+                ThenStepProvenance.from_dict(s)
+                for s in data.get("committed_steps", []) or []
+            ),
+            last_qualifying_evaluation_candle=data.get(
+                "last_qualifying_evaluation_candle"
+            ),
+            last_qualifying_confirmation_time=data.get(
+                "last_qualifying_confirmation_time"
+            ),
+            completed=bool(data.get("completed", False)),
+        )
 
 
 @dataclass(frozen=True)

@@ -1088,3 +1088,37 @@ def test_then_commits_and_or_branch_provenance(ev: ExpressionEvaluator):
     assert "OR satisfied by child[0]" in " ".join(or_prov.reasons) or "OR satisfied by child[1]" in " ".join(
         or_prov.reasons
     )
+
+
+def test_then_progress_to_dict_preserves_branch_provenance(ev: ExpressionEvaluator):
+    """ThenProgress.to_dict/from_dict round-trips committed step branch trees."""
+    step_expr = AndExpression(
+        children=(
+            OrExpression(
+                children=(
+                    ObservationRequirement(type="a"),
+                    ObservationRequirement(type="b"),
+                )
+            ),
+            ObservationRequirement(type="c"),
+        )
+    )
+    expr = ThenExpression(steps=(ThenStep(expression=step_expr),))
+    obs = [
+        _obs("b", 100, confirmed_at=100, oid="b_new"),
+        _obs("c", 100, confirmed_at=100, oid="c_new"),
+    ]
+    r = ev.evaluate(expr, obs, symbol=SYMBOL, timeframe=TF, candle_epoch=100)
+    assert r.progress is not None and r.progress.completed is True
+    assert r.progress.committed_steps[0].branch is not None
+
+    d = r.progress.to_dict()
+    assert "branch" in d["committed_steps"][0]
+    assert d["committed_steps"][0]["branch"] is not None
+    assert "child_provenances" in d["committed_steps"][0]["branch"]
+
+    restored = ThenProgress.from_dict(d)
+    assert restored.completed is True
+    assert restored.committed_steps[0].branch is not None
+    assert len(restored.committed_steps[0].branch.child_provenances) == 2
+    assert restored.committed_steps[0].branch.path == r.progress.committed_steps[0].branch.path
