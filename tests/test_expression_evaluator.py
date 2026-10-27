@@ -629,3 +629,122 @@ def test_idempotent_identical_inputs(ev: ExpressionEvaluator):
     r2 = ev.evaluate(expr, list(reversed(obs)), symbol=SYMBOL, timeframe=TF, candle_epoch=100)
     assert r1.qualified == r2.qualified
     assert [e.observation_id for e in r1.evidence] == [e.observation_id for e in r2.evidence]
+
+
+# ---------------------------------------------------------------------------
+# Review regression: order-independent AND, THEN context, nested THEN
+# ---------------------------------------------------------------------------
+
+
+def test_and_overlapping_requirements_order_independent(ev: ExpressionEvaluator):
+    """Broad + restricted swing requirements must qualify regardless of child order."""
+    obs = [
+        _obs("swing", 100, variant="hh", oid="hh"),
+        _obs("swing", 100, variant="hl", oid="hl"),
+    ]
+    expr_broad_first = AndExpression(
+        children=(
+            ObservationRequirement(type="swing"),
+            ObservationRequirement(type="swing", variant="hh"),
+        )
+    )
+    expr_restricted_first = AndExpression(
+        children=(
+            ObservationRequirement(type="swing", variant="hh"),
+            ObservationRequirement(type="swing"),
+        )
+    )
+    r1 = ev.evaluate(expr_broad_first, obs, symbol=SYMBOL, timeframe=TF, candle_epoch=100)
+    r2 = ev.evaluate(
+        expr_restricted_first, obs, symbol=SYMBOL, timeframe=TF, candle_epoch=100
+    )
+    assert r1.qualified is True, r1.reasons
+    assert r2.qualified is True, r2.reasons
+    assert {e.observation_id for e in r1.evidence} == {"hh", "hl"}
+    assert {e.observation_id for e in r2.evidence} == {"hh", "hl"}
+
+
+def test_then_no_advance_without_evaluation_context_first_step(ev: ExpressionEvaluator):
+    expr = ThenExpression(
+        steps=(ThenStep(expression=ObservationRequirement(type="a")),)
+    )
+    # Prior confirmed obs present, but no candle_epoch / evaluation_time
+    r = ev.evaluate(
+        expr,
+        [_obs("a", 100, oid="a1")],
+        symbol=SYMBOL,
+        timeframe=TF,
+        progress=ThenProgress(),
+    )
+    assert r.advanced is False
+    assert r.qualified is False
+    assert r.progress is not None
+    assert r.progress.next_step_index == 0
+    assert any("evaluation context" in x for x in r.reasons)
+
+
+def test_then_no_advance_without_evaluation_context_later_step(ev: ExpressionEvaluator):
+    expr = ThenExpression(
+        steps=(
+            ThenStep(expression=ObservationRequirement(type="a")),
+            ThenStep(expression=ObservationRequirement(type="b")),
+        )
+    )
+    r1 = ev.evaluate(
+        expr,
+        [_obs("a", 100, oid="a1")],
+        symbol=SYMBOL,
+        timeframe=TF,
+        candle_epoch=100,
+        progress=ThenProgress(),
+    )
+    assert r1.advanced is True
+    assert r1.progress is not None
+
+    r2 = ev.evaluate(
+        expr,
+        [_obs("a", 100, oid="a1"), _obs("b", 160, oid="b1")],
+        symbol=SYMBOL,
+        timeframe=TF,
+        # intentionally omit candle_epoch and evaluation_time
+        progress=r1.progress,
+    )
+    assert r2.advanced is False
+    assert r2.progress == r1.progress
+    assert any("evaluation context" in x for x in r2.reasons)
+
+
+def test_nested_then_rejected_by_validation():
+    from cpab.conditions.validation import SetupValidationError, parse_expression
+
+    with pytest.raises(SetupValidationError, match="nested THEN"):
+        parse_expression(
+            {
+                "op": "and",
+                "children": [
+                    {"op": "then", "steps": [{"type": "a"}]},
+                    {"type": "b"},
+                ],
+            }
+        )
+    with pytest.raises(SetupValidationError, match="nested THEN"):
+        parse_expression(
+            {
+                "op": "then",
+                "steps": [
+                    {"op": "then", "steps": [{"type": "a"}]},
+                    {"type": "b"},
+                ],
+            }
+        )
+    # AND/OR inside THEN remains valid
+    expr = parse_expression(
+        {
+            "op": "then",
+            "steps": [
+                {"op": "and", "children": [{"type": "a"}, {"type": "b"}]},
+                {"type": "c"},
+            ],
+        }
+    )
+    assert isinstance(expr, ThenExpression)

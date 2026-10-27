@@ -418,89 +418,190 @@ class ExpressionEvaluator:
         require_activation: bool,
         committed_ids: frozenset[str],
     ) -> tuple[BranchProvenance, bool, list[EvidenceItem], list[str]]:
-        child_provs: list[BranchProvenance] = []
-        all_evidence: list[EvidenceItem] = []
-        all_reasons: list[str] = []
-        used_ids: set[str] = set(committed_ids)
-        all_qualified = True
-        any_activation = False
+        """Evaluate AND with order-independent distinct-evidence allocation.
 
-        # Child order must not change whether AND qualifies — evaluate all,
-        # collect evidence deterministically. We still walk in declared order
-        # for provenance stability, but qualification is independent of order.
+        Children are assigned evidence from a shared pool. Assignment order is
+        derived from constraint tightness (fewest eligible first), not declaration
+        order, so reversing AND children cannot change whether the AND qualifies.
+        Provenance is still reported in declared child order.
+        """
+        n = len(expr.children)
+        # Phase 1: evaluate each child against the full remaining pool (THEN
+        # committed ids only) so eligibility does not depend on sibling order.
+        prefer = require_activation and T is not None
+        independent: list[
+            tuple[int, BranchProvenance, bool, list[EvidenceItem], list[str]]
+        ] = []
         for i, child in enumerate(expr.children):
             child_path = f"{path}.and[{i}]"
-            # Within AND, children share the pool; already-used ids cannot
-            # satisfy another sibling requirement (distinct observations).
-            # Prefer activation evidence in children so overall AND can activate
-            # when any child has new evidence; activation gate remains at AND level.
             c_prov, c_ok, c_ev, c_reasons = self._eval_node(
                 child,
                 obs_list,
                 path=child_path,
                 T=T,
                 require_activation=False,
-                committed_ids=frozenset(used_ids),
-                prefer_activation=(require_activation and T is not None),
+                committed_ids=committed_ids,
+                prefer_activation=prefer,
             )
-            child_provs.append(c_prov)
-            all_reasons.extend(c_reasons)
-            if not c_ok:
-                all_qualified = False
-            else:
-                for e in c_ev:
-                    used_ids.add(e.observation_id)
-                    all_evidence.append(e)
-                    if e.is_activation:
-                        any_activation = True
+            independent.append((i, c_prov, c_ok, c_ev, c_reasons))
 
-        if not all_qualified:
-            reasons = all_reasons + [f"{path}: AND not satisfied (not all children qualified)"]
+        # If any child has zero eligible evidence even with the full pool, fail.
+        if any(not c_ok for _, _, c_ok, _, _ in independent):
+            child_provs = [None] * n  # type: ignore[list-item]
+            all_reasons: list[str] = []
+            all_evidence: list[EvidenceItem] = []
+            for i, c_prov, c_ok, c_ev, c_reasons in independent:
+                child_provs[i] = c_prov
+                all_reasons.extend(c_reasons)
+                if c_ok:
+                    all_evidence.extend(c_ev)
+            reasons = all_reasons + [
+                f"{path}: AND not satisfied (not all children qualified)"
+            ]
             prov = BranchProvenance(
                 path=path,
                 qualified=False,
                 evidence=tuple(all_evidence),
-                child_provenances=tuple(child_provs),
+                child_provenances=tuple(child_provs),  # type: ignore[arg-type]
                 reasons=tuple(reasons),
             )
             return prov, False, all_evidence, reasons
 
+        # Phase 2: assign distinct observation ids. Rank children by constraint
+        # tightness so overlapping requirements resolve independently of
+        # declaration order. Keys are path-independent except for a final
+        # original-index tie-break used only to stabilize *which* valid
+        # assignment is chosen, not whether one exists.
+        def _rank_key(
+            item: tuple[int, BranchProvenance, bool, list[EvidenceItem], list[str]],
+        ) -> tuple:
+            i, _, _, c_ev, _ = item
+            child = expr.children[i]
+            # Eligible count from independent evaluation; fewer options first.
+            # More specific leaves (variant set) rank before unrestricted ones so
+            # overlapping type requirements do not starve restricted children.
+            n_elig = len({e.observation_id for e in c_ev})
+            if isinstance(child, ObservationRequirement):
+                specific = 0 if child.variant is not None else 1
+                variant_key = child.variant or ""
+                type_key = child.type
+                min_c = child.min_count
+            else:
+                specific = 2
+                variant_key = ""
+                type_key = type(child).__name__
+                min_c = 1
+            return (specific, n_elig, min_c, type_key, variant_key, i)
+
+        ranked = sorted(independent, key=_rank_key)
+        by_index = {i: (c_prov, c_ok, c_ev, c_reasons) for i, c_prov, c_ok, c_ev, c_reasons in independent}
+
+        used_ids: set[str] = set(committed_ids)
+        assigned: dict[int, list[EvidenceItem]] = {}
+        failure_prov: dict[int, tuple[BranchProvenance, list[str]]] = {}
+        assign_ok = True
+        for i, _c_prov, _c_ok, c_ev, _c_reasons in ranked:
+            child = expr.children[i]
+            child_path = f"{path}.and[{i}]"
+            # Re-evaluate with depleted ids so selection respects prior assigns.
+            c_prov2, c_ok2, c_ev2, c_reasons2 = self._eval_node(
+                child,
+                obs_list,
+                path=child_path,
+                T=T,
+                require_activation=False,
+                committed_ids=frozenset(used_ids),
+                prefer_activation=prefer,
+            )
+            if not c_ok2:
+                assign_ok = False
+                assigned[i] = []
+                failure_prov[i] = (c_prov2, c_reasons2)
+                break
+            assigned[i] = c_ev2
+            for e in c_ev2:
+                used_ids.add(e.observation_id)
+
+        # Rebuild provenance in declared order
+        child_provs_out: list[BranchProvenance] = []
+        all_evidence_out: list[EvidenceItem] = []
+        all_reasons_out: list[str] = []
+        any_activation = False
+        for i, child in enumerate(expr.children):
+            child_path = f"{path}.and[{i}]"
+            if assign_ok and i in assigned and assigned[i]:
+                ev = assigned[i]
+                all_evidence_out.extend(ev)
+                for e in ev:
+                    if e.is_activation:
+                        any_activation = True
+                desc_ids = ",".join(e.observation_id for e in ev)
+                reasons_i = [f"{child_path}: assigned evidence [{desc_ids}]"]
+                child_provs_out.append(
+                    BranchProvenance(
+                        path=child_path,
+                        qualified=True,
+                        evidence=tuple(ev),
+                        reasons=tuple(reasons_i),
+                    )
+                )
+                all_reasons_out.extend(reasons_i)
+            elif i in failure_prov:
+                c_prov_f, c_reasons_f = failure_prov[i]
+                child_provs_out.append(c_prov_f)
+                all_reasons_out.extend(c_reasons_f)
+            else:
+                c_prov, _c_ok, _c_ev, c_reasons = by_index[i]
+                child_provs_out.append(c_prov)
+                all_reasons_out.extend(c_reasons)
+
+        if not assign_ok:
+            reasons = all_reasons_out + [
+                f"{path}: AND not satisfied (distinct-evidence allocation failed)"
+            ]
+            prov = BranchProvenance(
+                path=path,
+                qualified=False,
+                evidence=tuple(all_evidence_out),
+                child_provenances=tuple(child_provs_out),
+                reasons=tuple(reasons),
+            )
+            return prov, False, all_evidence_out, reasons
+
         if require_activation and T is not None and not any_activation:
-            # Re-check from observations in case EvidenceItem flags missed edge cases
             obs_by_id = {o.id: o for o in obs_list}
             any_activation = any(
                 self._is_activation_observation(obs_by_id[e.observation_id], T)
-                for e in all_evidence
+                for e in all_evidence_out
                 if e.observation_id in obs_by_id
             )
             if not any_activation:
-                reasons = all_reasons + [
+                reasons = all_reasons_out + [
                     f"{path}: AND satisfied by prior evidence only; "
                     f"no activation observation at T={T}"
                 ]
                 prov = BranchProvenance(
                     path=path,
                     qualified=False,
-                    evidence=tuple(all_evidence),
-                    child_provenances=tuple(child_provs),
+                    evidence=tuple(all_evidence_out),
+                    child_provenances=tuple(child_provs_out),
                     reasons=tuple(reasons),
                 )
-                return prov, False, all_evidence, reasons
+                return prov, False, all_evidence_out, reasons
 
-        # Deduplicate evidence by observation id while preserving order
         seen: set[str] = set()
         deduped: list[EvidenceItem] = []
-        for e in all_evidence:
+        for e in all_evidence_out:
             if e.observation_id not in seen:
                 seen.add(e.observation_id)
                 deduped.append(e)
 
-        reasons = all_reasons + [f"{path}: AND satisfied"]
+        reasons = all_reasons_out + [f"{path}: AND satisfied"]
         prov = BranchProvenance(
             path=path,
             qualified=True,
             evidence=tuple(deduped),
-            child_provenances=tuple(child_provs),
+            child_provenances=tuple(child_provs_out),
             reasons=tuple(reasons),
         )
         return prov, True, deduped, reasons
@@ -584,24 +685,31 @@ class ExpressionEvaluator:
         step = steps[step_idx]
         reasons: list[str] = []
 
+        # A THEN step may advance only when the caller supplies enough
+        # current-event context to verify activation and record a valid
+        # evaluation candle. Omitting both evaluation_time and candle_epoch
+        # must not allow prior-only evidence to advance the sequence.
+        eval_candle = candle_epoch if candle_epoch is not None else T
+        if T is None or eval_candle is None:
+            reasons.append(
+                f"THEN step[{step_idx}]: evaluation context required "
+                f"(evaluation_time or candle_epoch); cannot advance without "
+                f"a current evaluation event"
+            )
+            return ExpressionEvalResult(
+                qualified=False,
+                reasons=tuple(reasons),
+                progress=progress,
+                advanced=False,
+                symbol=symbol,
+                timeframe=timeframe,
+                evaluation_time=T,
+                candle_epoch=candle_epoch,
+            )
+
         # Candle progression constraint (steps after the first).
         if step_idx > 0 and progress.last_qualifying_evaluation_candle is not None:
             last_candle = progress.last_qualifying_evaluation_candle
-            eval_candle = candle_epoch if candle_epoch is not None else T
-            if eval_candle is None:
-                reasons.append(
-                    f"THEN step[{step_idx}]: evaluation candle required for progression"
-                )
-                return ExpressionEvalResult(
-                    qualified=False,
-                    reasons=tuple(reasons),
-                    progress=progress,
-                    advanced=False,
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    evaluation_time=T,
-                    candle_epoch=candle_epoch,
-                )
             if not step.allow_same_candle:
                 if eval_candle <= last_candle:
                     reasons.append(
@@ -690,7 +798,7 @@ class ExpressionEvaluator:
                 candle_epoch=candle_epoch,
             )
 
-        eval_candle = candle_epoch if candle_epoch is not None else (T if T is not None else 0)
+        # eval_candle was validated non-None above
         step_prov = ThenStepProvenance(
             step_index=step_idx,
             evaluation_candle=eval_candle,
