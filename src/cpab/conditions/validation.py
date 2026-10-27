@@ -82,8 +82,16 @@ def parse_expression(
     path: str = "expression",
     setup_id: Optional[str] = None,
     allow_same_candle_on_leaf: bool = False,
+    allow_then: bool = True,
 ) -> Expression:
-    """Parse and strictly validate an expression tree."""
+    """Parse and strictly validate an expression tree.
+
+    THEN may only appear at the top level of a setup expression (or as the
+    root of a standalone parse with allow_then=True). Nested THEN inside
+    AND/OR children or inside ThenStep expressions is rejected so that
+    executable configurations never silently fail for lack of sequence
+    progress state.
+    """
     data = _require_dict(raw, path, setup_id)
     if "op" in data:
         op = data["op"]
@@ -99,6 +107,14 @@ def parse_expression(
         if op_norm == "or":
             return _parse_or(data, path=path, setup_id=setup_id)
         if op_norm == "then":
+            if not allow_then:
+                raise SetupValidationError(
+                    "nested THEN is not permitted; THEN may only appear as the "
+                    "top-level expression (Phase 7B sequence progress is "
+                    "single-sequence only)",
+                    path=f"{path}.op",
+                    setup_id=setup_id,
+                )
             return _parse_then(data, path=path, setup_id=setup_id)
         raise SetupValidationError(
             f"unknown operator {op!r}; expected and, or, or then",
@@ -189,7 +205,9 @@ def _parse_and(
             setup_id=setup_id,
         )
     children = tuple(
-        parse_expression(c, path=f"{path}.children[{i}]", setup_id=setup_id)
+        parse_expression(
+            c, path=f"{path}.children[{i}]", setup_id=setup_id, allow_then=False
+        )
         for i, c in enumerate(children_raw)
     )
     return AndExpression(children=children)
@@ -213,7 +231,9 @@ def _parse_or(
             setup_id=setup_id,
         )
     children = tuple(
-        parse_expression(c, path=f"{path}.children[{i}]", setup_id=setup_id)
+        parse_expression(
+            c, path=f"{path}.children[{i}]", setup_id=setup_id, allow_then=False
+        )
         for i, c in enumerate(children_raw)
     )
     return OrExpression(children=children)
@@ -261,6 +281,7 @@ def _parse_then(
             path=step_path,
             setup_id=setup_id,
             allow_same_candle_on_leaf=False,
+            allow_then=False,
         )
         steps.append(ThenStep(expression=expr, allow_same_candle=allow_same))
     return ThenExpression(steps=tuple(steps))

@@ -1,4 +1,4 @@
-"""Condition evaluation and Phase 7A setup schema / validation."""
+"""Condition evaluation and Phase 7A/7B setup schema, validation, expression evaluation."""
 
 from cpab.conditions.evaluator import ConditionEvaluator
 from cpab.conditions.expression import (
@@ -8,6 +8,14 @@ from cpab.conditions.expression import (
     OrExpression,
     ThenExpression,
     ThenStep,
+)
+from cpab.conditions.expression_evaluator import (
+    BranchProvenance,
+    EvidenceItem,
+    ExpressionEvalResult,
+    ExpressionEvaluator,
+    ThenProgress,
+    ThenStepProvenance,
 )
 from cpab.conditions.identity import setup_config_identity
 from cpab.conditions.schema import SCHEMA_VERSION_V1, SetupDef
@@ -21,6 +29,12 @@ __all__ = [
     "OrExpression",
     "ThenExpression",
     "ThenStep",
+    "BranchProvenance",
+    "EvidenceItem",
+    "ExpressionEvalResult",
+    "ExpressionEvaluator",
+    "ThenProgress",
+    "ThenStepProvenance",
     "setup_config_identity",
     "SCHEMA_VERSION_V1",
     "SetupDef",
