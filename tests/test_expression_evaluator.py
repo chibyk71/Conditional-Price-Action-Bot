@@ -795,3 +795,57 @@ def test_or_no_qualify_without_evaluation_context(ev: ExpressionEvaluator):
     )
     assert r.qualified is False
     assert any("evaluation context" in x for x in r.reasons)
+
+
+def test_nested_and_propagates_activation_preference(ev: ExpressionEvaluator):
+    """AND(AND(a, b)) must use current-event a as activation with prior b."""
+    expr = AndExpression(
+        children=(
+            AndExpression(
+                children=(
+                    ObservationRequirement(type="a"),
+                    ObservationRequirement(type="b"),
+                )
+            ),
+        )
+    )
+    prior_a = _obs("a", 50, confirmed_at=50, oid="a_prior")
+    prior_b = _obs("b", 60, confirmed_at=60, oid="b_prior")
+    new_a = _obs("a", 100, confirmed_at=100, oid="a_new")
+
+    for order in (
+        [prior_a, prior_b, new_a],
+        [new_a, prior_b, prior_a],
+        [prior_b, prior_a, new_a],
+        [new_a, prior_a, prior_b],
+    ):
+        r = ev.evaluate(expr, order, symbol=SYMBOL, timeframe=TF, candle_epoch=100)
+        assert r.qualified is True, (order, r.reasons)
+        ids = {e.observation_id for e in r.evidence}
+        assert "a_new" in ids, (order, ids)
+        assert "b_prior" in ids, (order, ids)
+        assert any(e.is_activation for e in r.evidence), (order, r.evidence)
+
+
+def test_nested_and_prior_only_still_fails_activation(ev: ExpressionEvaluator):
+    expr = AndExpression(
+        children=(
+            AndExpression(
+                children=(
+                    ObservationRequirement(type="a"),
+                    ObservationRequirement(type="b"),
+                )
+            ),
+        )
+    )
+    r = ev.evaluate(
+        expr,
+        [
+            _obs("a", 50, confirmed_at=50, oid="a_prior"),
+            _obs("b", 60, confirmed_at=60, oid="b_prior"),
+        ],
+        symbol=SYMBOL,
+        timeframe=TF,
+        candle_epoch=100,
+    )
+    assert r.qualified is False

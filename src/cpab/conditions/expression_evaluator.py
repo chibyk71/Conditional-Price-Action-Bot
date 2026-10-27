@@ -268,6 +268,7 @@ class ExpressionEvaluator:
                 T=T,
                 require_activation=require_activation,
                 committed_ids=committed_ids,
+                prefer_activation=prefer_activation or require_activation,
             )
         if isinstance(expression, OrExpression):
             return self._eval_or(
@@ -277,6 +278,7 @@ class ExpressionEvaluator:
                 T=T,
                 require_activation=require_activation,
                 committed_ids=committed_ids,
+                prefer_activation=prefer_activation or require_activation,
             )
         if isinstance(expression, ThenExpression):
             # Nested THEN is not expected as a child of AND/OR in 7A schema usage,
@@ -443,6 +445,7 @@ class ExpressionEvaluator:
         T: Optional[int],
         require_activation: bool,
         committed_ids: frozenset[str],
+        prefer_activation: bool = False,
     ) -> tuple[BranchProvenance, bool, list[EvidenceItem], list[str]]:
         """Evaluate AND with order-independent distinct-evidence allocation.
 
@@ -450,11 +453,14 @@ class ExpressionEvaluator:
         derived from constraint tightness (fewest eligible first), not declaration
         order, so reversing AND children cannot change whether the AND qualifies.
         Provenance is still reported in declared child order.
+
+        prefer_activation is propagated into nested AND/OR/leaf children so an
+        outer activation requirement is not lost when a child is itself an AND.
         """
         n = len(expr.children)
         # Phase 1: evaluate each child against the full remaining pool (THEN
         # committed ids only) so eligibility does not depend on sibling order.
-        prefer = require_activation and T is not None
+        prefer = (require_activation or prefer_activation) and T is not None
         independent: list[
             tuple[int, BranchProvenance, bool, list[EvidenceItem], list[str]]
         ] = []
@@ -641,9 +647,13 @@ class ExpressionEvaluator:
         T: Optional[int],
         require_activation: bool,
         committed_ids: frozenset[str],
+        prefer_activation: bool = False,
     ) -> tuple[BranchProvenance, bool, list[EvidenceItem], list[str]]:
         child_provs: list[BranchProvenance] = []
         all_reasons: list[str] = []
+        # Propagate activation preference into nested children (e.g. AND under OR
+        # under outer AND) without changing declared-order first-match semantics.
+        prefer = prefer_activation or require_activation
 
         # Declared child order: first qualifying branch wins.
         for i, child in enumerate(expr.children):
@@ -655,6 +665,7 @@ class ExpressionEvaluator:
                 T=T,
                 require_activation=require_activation,
                 committed_ids=committed_ids,
+                prefer_activation=prefer,
             )
             child_provs.append(c_prov)
             all_reasons.extend(c_reasons)
