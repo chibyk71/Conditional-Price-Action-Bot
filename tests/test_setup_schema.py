@@ -197,6 +197,48 @@ def test_invalid_same_candle_type():
         )
 
 
+def test_allow_same_candle_rejected_on_first_then_step():
+    with pytest.raises(SetupValidationError, match="first THEN step"):
+        parse_expression(
+            {
+                "op": "then",
+                "steps": [
+                    {"type": "swing_high", "allow_same_candle": True},
+                    {"type": "zone_retest"},
+                ],
+            }
+        )
+
+
+def test_allow_same_candle_accepted_on_later_then_step():
+    expr = parse_expression(
+        {
+            "op": "then",
+            "steps": [
+                {"type": "swing_high"},
+                {"type": "zone_retest", "allow_same_candle": True},
+            ],
+        }
+    )
+    assert isinstance(expr, ThenExpression)
+    assert expr.steps[0].allow_same_candle is False
+    assert expr.steps[1].allow_same_candle is True
+
+
+def test_allow_same_candle_default_false_on_first_step():
+    expr = parse_expression(
+        {
+            "op": "then",
+            "steps": [
+                {"type": "swing_high"},
+                {"type": "zone_retest"},
+            ],
+        }
+    )
+    assert expr.steps[0].allow_same_candle is False
+    assert expr.steps[1].allow_same_candle is False
+
+
 def test_unknown_fields_on_leaf_rejected():
     with pytest.raises(SetupValidationError, match="unknown field"):
         parse_expression({"type": "x", "extra": 1})
@@ -235,6 +277,24 @@ def test_unsupported_schema_version():
                 "expression": _leaf(),
             }
         )
+
+
+def test_schema_version_rejects_non_integer_types():
+    """True == 1 and 1.0 == 1 in Python; require a real integer."""
+    base = {
+        "setup_id": "s",
+        "symbol": "R_100",
+        "timeframe": "1m",
+        "enabled": True,
+        "expression": _leaf(),
+    }
+    for bad in (True, False, 1.0, "1"):
+        raw = {**base, "schema_version": bad}
+        with pytest.raises(SetupValidationError, match="schema_version must be an integer"):
+            parse_setup(raw)
+    # Integer 1 remains accepted
+    ok = parse_setup({**base, "schema_version": 1})
+    assert ok.schema_version == 1
 
 
 def test_duplicate_setup_ids():
