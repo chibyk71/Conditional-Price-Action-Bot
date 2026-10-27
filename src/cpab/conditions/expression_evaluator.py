@@ -7,6 +7,7 @@ setup-instance lifecycle, invalidation, expiry, or signal emission.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import combinations
 from typing import Any, Iterable, Optional, Sequence, Union
 
 from cpab.conditions.expression import (
@@ -436,6 +437,249 @@ class ExpressionEvaluator:
         )
         return prov, True, evidence, reasons
 
+    def _eligible_observations(
+        self,
+        req: ObservationRequirement,
+        obs_list: Sequence[Observation],
+        *,
+        T: Optional[int],
+        committed_ids: frozenset[str],
+    ) -> list[Observation]:
+        """All distinct eligible observations for a leaf requirement (no selection)."""
+        candidates = [
+            o
+            for o in obs_list
+            if o.type == req.type
+            and (req.variant is None or o.variant == req.variant)
+            and o.id not in committed_ids
+        ]
+        eligible: list[Observation] = []
+        for o in candidates:
+            if o.is_developing():
+                continue
+            if T is not None:
+                if not o.is_eligible_at(T, allow_developing=False):
+                    continue
+            elif not o.is_confirmed():
+                continue
+            eligible.append(o)
+        eligible = sorted(
+            eligible,
+            key=lambda o: (
+                o.effective_confirmed_at() if o.effective_confirmed_at() is not None else 2**62,
+                o.id,
+            ),
+        )
+        seen: set[str] = set()
+        unique: list[Observation] = []
+        for o in eligible:
+            if o.id in seen:
+                continue
+            seen.add(o.id)
+            unique.append(o)
+        return unique
+
+    def _leaf_choice_sets(
+        self,
+        req: ObservationRequirement,
+        obs_list: Sequence[Observation],
+        *,
+        T: Optional[int],
+        used_ids: frozenset[str],
+        prefer_activation: bool,
+    ) -> list[tuple[Observation, ...]]:
+        """Deterministic candidate evidence sets of size min_count for a leaf.
+
+        When prefer_activation is set and activation observations exist, sets that
+        include at least one activation are tried first; all combinations remain
+        available so backtracking can recover a globally valid assignment.
+        """
+        eligible = self._eligible_observations(
+            req, obs_list, T=T, committed_ids=used_ids
+        )
+        if len(eligible) < req.min_count:
+            return []
+        act_ids = set()
+        if prefer_activation and T is not None:
+            act_ids = {
+                o.id for o in eligible if self._is_activation_observation(o, T)
+            }
+        combos = list(combinations(eligible, req.min_count))
+
+        def _combo_key(combo: tuple[Observation, ...]) -> tuple:
+            has_act = 0 if any(o.id in act_ids for o in combo) else 1
+            return (has_act, tuple(o.id for o in combo))
+
+        combos.sort(key=_combo_key)
+        return combos
+
+    def _assign_expression(
+        self,
+        expression: Expression,
+        obs_list: Sequence[Observation],
+        *,
+        path: str,
+        T: Optional[int],
+        used_ids: frozenset[str],
+        prefer_activation: bool,
+    ) -> Optional[list[EvidenceItem]]:
+        """Try to assign distinct evidence for an expression subtree.
+
+        Returns evidence list on success, None on failure. Uses backtracking so a
+        valid global assignment is found when one exists across nested AND/OR.
+        """
+        if isinstance(expression, ObservationRequirement):
+            for combo in self._leaf_choice_sets(
+                expression,
+                obs_list,
+                T=T,
+                used_ids=used_ids,
+                prefer_activation=prefer_activation,
+            ):
+                return [
+                    EvidenceItem.from_observation(o, evaluation_time=T) for o in combo
+                ]
+            return None
+
+        if isinstance(expression, AndExpression):
+            result = self._assign_and_children(
+                expression.children,
+                obs_list,
+                path=path,
+                T=T,
+                used_ids=used_ids,
+                prefer_activation=prefer_activation,
+            )
+            return result
+
+        if isinstance(expression, OrExpression):
+            # Declared order: first branch that can be assigned wins.
+            for i, child in enumerate(expression.children):
+                assigned = self._assign_expression(
+                    child,
+                    obs_list,
+                    path=f"{path}.or[{i}]",
+                    T=T,
+                    used_ids=used_ids,
+                    prefer_activation=prefer_activation,
+                )
+                if assigned is not None:
+                    return assigned
+            return None
+
+        # Nested THEN unsupported under AND/OR
+        return None
+
+    def _child_rank_key(
+        self,
+        index: int,
+        child: Expression,
+        obs_list: Sequence[Observation],
+        *,
+        T: Optional[int],
+        used_ids: frozenset[str],
+    ) -> tuple:
+        """Order-independent constraint ranking for AND children."""
+        if isinstance(child, ObservationRequirement):
+            n_elig = len(
+                self._eligible_observations(
+                    child, obs_list, T=T, committed_ids=used_ids
+                )
+            )
+            specific = 0 if child.variant is not None else 1
+            return (
+                specific,
+                n_elig,
+                child.min_count,
+                child.type,
+                child.variant or "",
+                index,
+            )
+        if isinstance(child, AndExpression):
+            # Nested AND is structurally constrained — rank before broad leaves.
+            return (-1, 0, len(child.children), "AndExpression", "", index)
+        if isinstance(child, OrExpression):
+            return (0, 0, len(child.children), "OrExpression", "", index)
+        return (9, 0, 0, type(child).__name__, "", index)
+
+    def _assign_and_children(
+        self,
+        children: Sequence[Expression],
+        obs_list: Sequence[Observation],
+        *,
+        path: str,
+        T: Optional[int],
+        used_ids: frozenset[str],
+        prefer_activation: bool,
+    ) -> Optional[list[EvidenceItem]]:
+        """Backtracking assignment of distinct evidence across AND children.
+
+        Search order is ranked by constraint tightness (not declaration order) so
+        qualification does not depend on child order. Nested composites are
+        assigned recursively so outer broad leaves cannot starve nested needs.
+        """
+        n = len(children)
+        order = sorted(
+            range(n),
+            key=lambda i: self._child_rank_key(
+                i, children[i], obs_list, T=T, used_ids=used_ids
+            ),
+        )
+        assignment: dict[int, list[EvidenceItem]] = {}
+
+        def search(pos: int, current_used: frozenset[str]) -> bool:
+            if pos >= len(order):
+                return True
+            i = order[pos]
+            child = children[i]
+            child_path = f"{path}.and[{i}]"
+
+            if isinstance(child, ObservationRequirement):
+                choices = self._leaf_choice_sets(
+                    child,
+                    obs_list,
+                    T=T,
+                    used_ids=current_used,
+                    prefer_activation=prefer_activation,
+                )
+                for combo in choices:
+                    ev = [
+                        EvidenceItem.from_observation(o, evaluation_time=T)
+                        for o in combo
+                    ]
+                    new_used = current_used | {e.observation_id for e in ev}
+                    assignment[i] = ev
+                    if search(pos + 1, frozenset(new_used)):
+                        return True
+                    del assignment[i]
+                return False
+
+            # Nested composite: try one full assignment for the subtree.
+            assigned = self._assign_expression(
+                child,
+                obs_list,
+                path=child_path,
+                T=T,
+                used_ids=current_used,
+                prefer_activation=prefer_activation,
+            )
+            if assigned is None:
+                return False
+            assignment[i] = assigned
+            new_used = current_used | {e.observation_id for e in assigned}
+            if search(pos + 1, frozenset(new_used)):
+                return True
+            del assignment[i]
+            return False
+
+        if not search(0, used_ids):
+            return None
+        # Flatten in declaration order for stable provenance.
+        out: list[EvidenceItem] = []
+        for i in range(n):
+            out.extend(assignment[i])
+        return out
+
     def _eval_and(
         self,
         expr: AndExpression,
@@ -447,193 +691,77 @@ class ExpressionEvaluator:
         committed_ids: frozenset[str],
         prefer_activation: bool = False,
     ) -> tuple[BranchProvenance, bool, list[EvidenceItem], list[str]]:
-        """Evaluate AND with order-independent distinct-evidence allocation.
+        """Evaluate AND with backtracking distinct-evidence allocation.
 
-        Children are assigned evidence from a shared pool. Assignment order is
-        derived from constraint tightness (fewest eligible first), not declaration
-        order, so reversing AND children cannot change whether the AND qualifies.
-        Provenance is still reported in declared child order.
-
-        prefer_activation is propagated into nested AND/OR/leaf children so an
-        outer activation requirement is not lost when a child is itself an AND.
+        Finds a valid assignment of distinct observations across children
+        (including nested AND/OR) when one exists. Search order is independent of
+        declaration order; provenance is reported in declared child order.
         """
-        n = len(expr.children)
-        # Phase 1: evaluate each child against the full remaining pool (THEN
-        # committed ids only) so eligibility does not depend on sibling order.
         prefer = (require_activation or prefer_activation) and T is not None
-        independent: list[
-            tuple[int, BranchProvenance, bool, list[EvidenceItem], list[str]]
-        ] = []
-        for i, child in enumerate(expr.children):
-            child_path = f"{path}.and[{i}]"
-            c_prov, c_ok, c_ev, c_reasons = self._eval_node(
-                child,
-                obs_list,
-                path=child_path,
-                T=T,
-                require_activation=False,
-                committed_ids=committed_ids,
-                prefer_activation=prefer,
-            )
-            independent.append((i, c_prov, c_ok, c_ev, c_reasons))
+        assigned = self._assign_and_children(
+            expr.children,
+            obs_list,
+            path=path,
+            T=T,
+            used_ids=committed_ids,
+            prefer_activation=prefer,
+        )
 
-        # If any child has zero eligible evidence even with the full pool, fail.
-        if any(not c_ok for _, _, c_ok, _, _ in independent):
-            child_provs = [None] * n  # type: ignore[list-item]
-            all_reasons: list[str] = []
-            all_evidence: list[EvidenceItem] = []
-            for i, c_prov, c_ok, c_ev, c_reasons in independent:
-                child_provs[i] = c_prov
-                all_reasons.extend(c_reasons)
-                if c_ok:
-                    all_evidence.extend(c_ev)
-            reasons = all_reasons + [
-                f"{path}: AND not satisfied (not all children qualified)"
-            ]
-            prov = BranchProvenance(
-                path=path,
-                qualified=False,
-                evidence=tuple(all_evidence),
-                child_provenances=tuple(child_provs),  # type: ignore[arg-type]
-                reasons=tuple(reasons),
-            )
-            return prov, False, all_evidence, reasons
-
-        # Phase 2: assign distinct observation ids. Rank children by constraint
-        # tightness so overlapping requirements resolve independently of
-        # declaration order. Keys are path-independent except for a final
-        # original-index tie-break used only to stabilize *which* valid
-        # assignment is chosen, not whether one exists.
-        def _rank_key(
-            item: tuple[int, BranchProvenance, bool, list[EvidenceItem], list[str]],
-        ) -> tuple:
-            i, _, _, c_ev, _ = item
-            child = expr.children[i]
-            # Eligible count from independent evaluation; fewer options first.
-            # More specific leaves (variant set) rank before unrestricted ones so
-            # overlapping type requirements do not starve restricted children.
-            n_elig = len({e.observation_id for e in c_ev})
-            if isinstance(child, ObservationRequirement):
-                specific = 0 if child.variant is not None else 1
-                variant_key = child.variant or ""
-                type_key = child.type
-                min_c = child.min_count
-            else:
-                specific = 2
-                variant_key = ""
-                type_key = type(child).__name__
-                min_c = 1
-            return (specific, n_elig, min_c, type_key, variant_key, i)
-
-        ranked = sorted(independent, key=_rank_key)
-        by_index = {i: (c_prov, c_ok, c_ev, c_reasons) for i, c_prov, c_ok, c_ev, c_reasons in independent}
-
-        used_ids: set[str] = set(committed_ids)
-        assigned: dict[int, list[EvidenceItem]] = {}
-        failure_prov: dict[int, tuple[BranchProvenance, list[str]]] = {}
-        assign_ok = True
-        for i, _c_prov, _c_ok, c_ev, _c_reasons in ranked:
-            child = expr.children[i]
-            child_path = f"{path}.and[{i}]"
-            # Re-evaluate with depleted ids so selection respects prior assigns.
-            c_prov2, c_ok2, c_ev2, c_reasons2 = self._eval_node(
-                child,
-                obs_list,
-                path=child_path,
-                T=T,
-                require_activation=False,
-                committed_ids=frozenset(used_ids),
-                prefer_activation=prefer,
-            )
-            if not c_ok2:
-                assign_ok = False
-                assigned[i] = []
-                failure_prov[i] = (c_prov2, c_reasons2)
-                break
-            assigned[i] = c_ev2
-            for e in c_ev2:
-                used_ids.add(e.observation_id)
-
-        # Rebuild provenance in declared order
-        child_provs_out: list[BranchProvenance] = []
-        all_evidence_out: list[EvidenceItem] = []
-        all_reasons_out: list[str] = []
-        any_activation = False
-        for i, child in enumerate(expr.children):
-            child_path = f"{path}.and[{i}]"
-            if assign_ok and i in assigned and assigned[i]:
-                ev = assigned[i]
-                all_evidence_out.extend(ev)
-                for e in ev:
-                    if e.is_activation:
-                        any_activation = True
-                desc_ids = ",".join(e.observation_id for e in ev)
-                reasons_i = [f"{child_path}: assigned evidence [{desc_ids}]"]
-                child_provs_out.append(
-                    BranchProvenance(
-                        path=child_path,
-                        qualified=True,
-                        evidence=tuple(ev),
-                        reasons=tuple(reasons_i),
-                    )
+        if assigned is None:
+            # Diagnostic: independent eligibility failure messages
+            reasons: list[str] = []
+            child_provs: list[BranchProvenance] = []
+            for i, child in enumerate(expr.children):
+                child_path = f"{path}.and[{i}]"
+                c_prov, c_ok, c_ev, c_reasons = self._eval_node(
+                    child,
+                    obs_list,
+                    path=child_path,
+                    T=T,
+                    require_activation=False,
+                    committed_ids=committed_ids,
+                    prefer_activation=prefer,
                 )
-                all_reasons_out.extend(reasons_i)
-            elif i in failure_prov:
-                c_prov_f, c_reasons_f = failure_prov[i]
-                child_provs_out.append(c_prov_f)
-                all_reasons_out.extend(c_reasons_f)
-            else:
-                c_prov, _c_ok, _c_ev, c_reasons = by_index[i]
-                child_provs_out.append(c_prov)
-                all_reasons_out.extend(c_reasons)
-
-        if not assign_ok:
-            reasons = all_reasons_out + [
-                f"{path}: AND not satisfied (distinct-evidence allocation failed)"
-            ]
+                child_provs.append(c_prov)
+                reasons.extend(c_reasons)
+            reasons.append(
+                f"{path}: AND not satisfied (no valid distinct-evidence assignment)"
+            )
             prov = BranchProvenance(
                 path=path,
                 qualified=False,
-                evidence=tuple(all_evidence_out),
-                child_provenances=tuple(child_provs_out),
+                child_provenances=tuple(child_provs),
                 reasons=tuple(reasons),
             )
-            return prov, False, all_evidence_out, reasons
+            return prov, False, [], reasons
 
+        any_activation = any(e.is_activation for e in assigned)
         if require_activation and T is not None and not any_activation:
-            obs_by_id = {o.id: o for o in obs_list}
-            any_activation = any(
-                self._is_activation_observation(obs_by_id[e.observation_id], T)
-                for e in all_evidence_out
-                if e.observation_id in obs_by_id
+            reasons = [
+                f"{path}: AND assignment found but no activation observation at T={T}"
+            ]
+            prov = BranchProvenance(
+                path=path,
+                qualified=False,
+                evidence=tuple(assigned),
+                reasons=tuple(reasons),
             )
-            if not any_activation:
-                reasons = all_reasons_out + [
-                    f"{path}: AND satisfied by prior evidence only; "
-                    f"no activation observation at T={T}"
-                ]
-                prov = BranchProvenance(
-                    path=path,
-                    qualified=False,
-                    evidence=tuple(all_evidence_out),
-                    child_provenances=tuple(child_provs_out),
-                    reasons=tuple(reasons),
-                )
-                return prov, False, all_evidence_out, reasons
+            return prov, False, list(assigned), reasons
 
+        # Build per-child provenance in declaration order via re-partition is hard
+        # after flattening; report combined evidence with path-level provenance.
         seen: set[str] = set()
         deduped: list[EvidenceItem] = []
-        for e in all_evidence_out:
+        for e in assigned:
             if e.observation_id not in seen:
                 seen.add(e.observation_id)
                 deduped.append(e)
 
-        reasons = all_reasons_out + [f"{path}: AND satisfied"]
+        reasons = [f"{path}: AND satisfied"]
         prov = BranchProvenance(
             path=path,
             qualified=True,
             evidence=tuple(deduped),
-            child_provenances=tuple(child_provs_out),
             reasons=tuple(reasons),
         )
         return prov, True, deduped, reasons
