@@ -984,3 +984,45 @@ def test_nested_or_preserves_declared_branch_order(ev: ExpressionEvaluator):
     assert r2.qualified is True, r2.reasons
     ids2 = {e.observation_id for e in r2.evidence}
     assert ids2 == {"a1", "b1"}
+
+
+def test_and_or_activation_continues_past_prior_only_assignment(ev: ExpressionEvaluator):
+    """AND(OR(a,b), c): prior a+c first must not block current b + prior c."""
+    expr = AndExpression(
+        children=(
+            OrExpression(
+                children=(
+                    ObservationRequirement(type="a"),
+                    ObservationRequirement(type="b"),
+                )
+            ),
+            ObservationRequirement(type="c"),
+        )
+    )
+    a_prior = _obs("a", 50, confirmed_at=50, oid="a_prior")
+    b_new = _obs("b", 100, confirmed_at=100, oid="b_new")
+    c_prior = _obs("c", 60, confirmed_at=60, oid="c_prior")
+
+    for order in (
+        [a_prior, b_new, c_prior],
+        [c_prior, a_prior, b_new],
+        [b_new, c_prior, a_prior],
+        [a_prior, c_prior, b_new],
+    ):
+        r = ev.evaluate(expr, order, symbol=SYMBOL, timeframe=TF, candle_epoch=100)
+        assert r.qualified is True, ([o.id for o in order], r.reasons)
+        ids = {e.observation_id for e in r.evidence}
+        assert "b_new" in ids, ids
+        assert "c_prior" in ids, ids
+        assert "a_prior" not in ids, ids
+        assert any(e.is_activation for e in r.evidence)
+
+    # Prior-only still cannot activate
+    r_prior = ev.evaluate(
+        expr,
+        [a_prior, c_prior],
+        symbol=SYMBOL,
+        timeframe=TF,
+        candle_epoch=100,
+    )
+    assert r_prior.qualified is False

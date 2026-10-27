@@ -665,8 +665,16 @@ class ExpressionEvaluator:
         T: Optional[int],
         used_ids: frozenset[str],
         prefer_activation: bool,
+        require_activation: bool = False,
     ) -> Optional[list[EvidenceItem]]:
-        """Return the first valid AND assignment, or None."""
+        """Return the first valid AND assignment satisfying activation when required.
+
+        Continues through generator alternatives so a prior-only first assignment
+        does not block a later assignment that includes current-event evidence.
+        Among complete (distinct + activation) solutions, declared OR order is
+        preserved because earlier OR branches are yielded first.
+        """
+        need_activation = require_activation and T is not None
         for assigned in self._iter_and_assignments(
             children,
             obs_list,
@@ -675,6 +683,8 @@ class ExpressionEvaluator:
             used_ids=used_ids,
             prefer_activation=prefer_activation,
         ):
+            if need_activation and not any(e.is_activation for e in assigned):
+                continue
             return assigned
         return None
 
@@ -692,8 +702,10 @@ class ExpressionEvaluator:
         """Evaluate AND with backtracking distinct-evidence allocation.
 
         Finds a valid assignment of distinct observations across children
-        (including nested AND/OR) when one exists. Search order is independent of
-        declaration order; provenance is reported in declared child order.
+        (including nested AND/OR) when one exists. When activation is required,
+        continues search until an assignment includes current-event evidence.
+        Search order is independent of declaration order; provenance is reported
+        in declared child order.
         """
         prefer = (require_activation or prefer_activation) and T is not None
         assigned = self._assign_and_children(
@@ -703,6 +715,7 @@ class ExpressionEvaluator:
             T=T,
             used_ids=committed_ids,
             prefer_activation=prefer,
+            require_activation=require_activation,
         )
 
         if assigned is None:
@@ -722,9 +735,15 @@ class ExpressionEvaluator:
                 )
                 child_provs.append(c_prov)
                 reasons.extend(c_reasons)
-            reasons.append(
-                f"{path}: AND not satisfied (no valid distinct-evidence assignment)"
-            )
+            if require_activation and T is not None:
+                reasons.append(
+                    f"{path}: AND not satisfied (no valid assignment with "
+                    f"activation evidence at T={T})"
+                )
+            else:
+                reasons.append(
+                    f"{path}: AND not satisfied (no valid distinct-evidence assignment)"
+                )
             prov = BranchProvenance(
                 path=path,
                 qualified=False,
@@ -732,19 +751,6 @@ class ExpressionEvaluator:
                 reasons=tuple(reasons),
             )
             return prov, False, [], reasons
-
-        any_activation = any(e.is_activation for e in assigned)
-        if require_activation and T is not None and not any_activation:
-            reasons = [
-                f"{path}: AND assignment found but no activation observation at T={T}"
-            ]
-            prov = BranchProvenance(
-                path=path,
-                qualified=False,
-                evidence=tuple(assigned),
-                reasons=tuple(reasons),
-            )
-            return prov, False, list(assigned), reasons
 
         # Build per-child provenance in declaration order via re-partition is hard
         # after flattening; report combined evidence with path-level provenance.
