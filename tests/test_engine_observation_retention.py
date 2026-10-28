@@ -29,6 +29,10 @@ class FakeMarket:
     def completed_candles(self, symbol: str, timeframe: str) -> list[Candle]:
         return list(self._candles[(symbol, timeframe)])
 
+    def series_ok(self, symbol: str, timeframe: str) -> bool:
+        """Default healthy so engine series-health gate allows evaluation."""
+        return True
+
 
 class ScriptedDetector(PriceActionDetector):
     def __init__(self, name: str, observation: Observation, emit_at: int) -> None:

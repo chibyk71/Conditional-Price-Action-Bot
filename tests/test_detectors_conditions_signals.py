@@ -16,6 +16,10 @@ class FakeMarket:
     def completed_candles(self, symbol, timeframe):
         return [c for c in self._candles if c.is_closed and c.symbol == symbol and c.timeframe == timeframe]
 
+    def series_ok(self, symbol, timeframe) -> bool:
+        """Default healthy so engine series-health gate allows evaluation."""
+        return True
+
 
 def _engulfing_pair(symbol="R_100", tf="1m", start=1_700_000_000):
     # bearish then bullish engulfing
