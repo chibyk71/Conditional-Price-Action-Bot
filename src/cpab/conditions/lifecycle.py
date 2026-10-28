@@ -113,12 +113,12 @@ class SetupLifecycleEvaluator:
 
         Precedence for a valid evaluation event:
           1. Terminal state → preserve
-          2. Invalidation
+          2. Invalidation (and note concurrent expiry reasons)
           3. Expiry
           4. Expression activation / completion
 
-        Missing/unhealthy/out-of-order data yields diagnostic_only without
-        changing accepted lifecycle state.
+        Missing/unhealthy/out-of-order/discontinuous data yields diagnostic_only
+        without changing accepted lifecycle state.
         """
         previous = instance.state
         T = evaluation_time if evaluation_time is not None else candle_epoch
@@ -131,6 +131,30 @@ class SetupLifecycleEvaluator:
                 transitioned=False,
                 previous_state=previous,
                 reasons=("terminal state is immutable",),
+            )
+
+        # Config identity must match the instance's recorded config
+        expected_config_id = setup_config_identity(setup)
+        if instance.config_id != expected_config_id:
+            return LifecycleEvalResult(
+                instance=instance,
+                transitioned=False,
+                previous_state=previous,
+                reasons=(
+                    f"setup config identity mismatch: instance.config_id="
+                    f"{instance.config_id!r} != setup {expected_config_id!r}",
+                ),
+                diagnostic_only=True,
+            )
+
+        # Disabled setups must not activate or complete
+        if not setup.enabled:
+            return LifecycleEvalResult(
+                instance=instance,
+                transitioned=False,
+                previous_state=previous,
+                reasons=("setup is disabled; lifecycle state unchanged",),
+                diagnostic_only=True,
             )
 
         # Data health: do not invalidate/expire or advance on bad data
@@ -174,6 +198,42 @@ class SetupLifecycleEvaluator:
                 reasons=("idempotent: evaluation candle already accepted",),
             )
 
+        # Continuity: next accepted candle must be exactly one step after last
+        if (
+            instance.last_evaluation_candle is not None
+            and timeframe_seconds is not None
+            and timeframe_seconds > 0
+        ):
+            expected = instance.last_evaluation_candle + timeframe_seconds
+            if candle_epoch != expected:
+                return LifecycleEvalResult(
+                    instance=instance,
+                    transitioned=False,
+                    previous_state=previous,
+                    reasons=(
+                        f"discontinuous evaluation candle {candle_epoch}; "
+                        f"expected {expected} after last accepted "
+                        f"{instance.last_evaluation_candle} "
+                        f"(timeframe_seconds={timeframe_seconds})",
+                    ),
+                    diagnostic_only=True,
+                )
+
+        # Expiry configured requires evaluable timeframe context
+        if setup.expiry is not None and (
+            timeframe_seconds is None or timeframe_seconds <= 0
+        ):
+            return LifecycleEvalResult(
+                instance=instance,
+                transitioned=False,
+                previous_state=previous,
+                reasons=(
+                    "expiry configured but timeframe_seconds missing or "
+                    "non-positive; cannot evaluate lifecycle safely",
+                ),
+                diagnostic_only=True,
+            )
+
         obs_list = list(observations)
 
         # Establish / keep anchor on first accepted evaluation
@@ -183,8 +243,9 @@ class SetupLifecycleEvaluator:
             else candle_epoch
         )
 
-        # 2. Invalidation
+        # 2–3. Invalidation and expiry (evaluate both; invalidation wins)
         inv_result: Optional[ExpressionEvalResult] = None
+        invalidated = False
         if setup.invalidation is not None:
             inv_result = self._expr.evaluate(
                 setup.invalidation,
@@ -195,27 +256,13 @@ class SetupLifecycleEvaluator:
                 evaluation_time=T,
             )
             if inv_result.qualified:
+                invalidated = True
                 reasons.append("invalidation condition qualified")
                 if inv_result.reasons:
                     reasons.extend(inv_result.reasons)
-                new_inst = replace(
-                    instance,
-                    state=LifecycleState.INVALIDATED,
-                    anchor_candle_epoch=anchor,
-                    last_evaluation_candle=candle_epoch,
-                    last_transition_reasons=tuple(reasons),
-                    # Explicitly preserve THEN progress — invalidation must not mutate it
-                    progress=instance.progress,
-                )
-                return LifecycleEvalResult(
-                    instance=new_inst,
-                    transitioned=True,
-                    previous_state=previous,
-                    reasons=tuple(reasons),
-                    invalidation_result=inv_result,
-                )
 
-        # 3. Expiry
+        expired = False
+        exp_reasons: list[str] = []
         if setup.expiry is not None:
             expired, exp_reasons = self._check_expiry(
                 setup.expiry,
@@ -225,21 +272,41 @@ class SetupLifecycleEvaluator:
             )
             if expired:
                 reasons.extend(exp_reasons)
-                new_inst = replace(
-                    instance,
-                    state=LifecycleState.EXPIRED,
-                    anchor_candle_epoch=anchor,
-                    last_evaluation_candle=candle_epoch,
-                    last_transition_reasons=tuple(reasons),
-                    progress=instance.progress,
-                )
-                return LifecycleEvalResult(
-                    instance=new_inst,
-                    transitioned=True,
-                    previous_state=previous,
-                    reasons=tuple(reasons),
-                    invalidation_result=inv_result,
-                )
+
+        if invalidated:
+            # INVALIDATED takes precedence; keep concurrent expiry reasons
+            new_inst = replace(
+                instance,
+                state=LifecycleState.INVALIDATED,
+                anchor_candle_epoch=anchor,
+                last_evaluation_candle=candle_epoch,
+                last_transition_reasons=tuple(reasons),
+                progress=instance.progress,
+            )
+            return LifecycleEvalResult(
+                instance=new_inst,
+                transitioned=True,
+                previous_state=previous,
+                reasons=tuple(reasons),
+                invalidation_result=inv_result,
+            )
+
+        if expired:
+            new_inst = replace(
+                instance,
+                state=LifecycleState.EXPIRED,
+                anchor_candle_epoch=anchor,
+                last_evaluation_candle=candle_epoch,
+                last_transition_reasons=tuple(reasons),
+                progress=instance.progress,
+            )
+            return LifecycleEvalResult(
+                instance=new_inst,
+                transitioned=True,
+                previous_state=previous,
+                reasons=tuple(reasons),
+                invalidation_result=inv_result,
+            )
 
         # 4. Expression activation / completion
         progress = instance.progress
@@ -376,19 +443,20 @@ class SetupLifecycleEvaluator:
 
         elapsed = (candle_epoch - anchor) // timeframe_seconds
         expires when elapsed >= max_age_candles (inclusive boundary).
-        Requires positive timeframe_seconds; without it, expiry cannot be evaluated
-        and is treated as not expired (caller must supply duration for expiry).
+
+        Caller must supply positive timeframe_seconds; evaluate() rejects the
+        event diagnostically when expiry is configured without it. Continuity
+        from the last accepted candle is enforced in evaluate() before this runs.
         """
         if timeframe_seconds is None or timeframe_seconds <= 0:
+            # Should not reach here when evaluate() gates correctly
             return False, [
-                "expiry configured but timeframe_seconds missing or non-positive; "
-                "expiry not applied"
+                "expiry configured but timeframe_seconds missing or non-positive"
             ]
         if candle_epoch < anchor_candle_epoch:
             return False, ["evaluation candle before anchor; expiry not applied"]
         delta = candle_epoch - anchor_candle_epoch
         if delta % timeframe_seconds != 0:
-            # Discontinuous / non-grid epoch: do not manufacture progress
             return False, [
                 f"candle_epoch {candle_epoch} not aligned with anchor "
                 f"{anchor_candle_epoch} and timeframe_seconds {timeframe_seconds}"

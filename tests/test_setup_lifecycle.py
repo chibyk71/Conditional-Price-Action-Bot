@@ -220,22 +220,23 @@ def test_expiry_inclusive_boundary(life):
     )
     inst = new_pending_instance(setup, instance_key="1")
     # First accepted eval at 100 → anchor=100
-    r0 = life.evaluate(setup, inst, [], candle_epoch=100, timeframe_seconds=TF_SEC)
-    assert r0.instance.state == LifecycleState.PENDING
-    assert r0.instance.anchor_candle_epoch == 100
+    r = life.evaluate(setup, inst, [], candle_epoch=100, timeframe_seconds=TF_SEC)
+    assert r.instance.state == LifecycleState.PENDING
+    assert r.instance.anchor_candle_epoch == 100
 
-    # elapsed=2 (<3) at 100+2*60=220
-    r1 = life.evaluate(
-        setup, r0.instance, [], candle_epoch=220, timeframe_seconds=TF_SEC
-    )
-    assert r1.instance.state == LifecycleState.PENDING
+    # Step continuously: 160 (elapsed=1), 220 (elapsed=2) still pending
+    for epoch in (160, 220):
+        r = life.evaluate(
+            setup, r.instance, [], candle_epoch=epoch, timeframe_seconds=TF_SEC
+        )
+        assert r.instance.state == LifecycleState.PENDING, epoch
 
-    # elapsed=3 (>=3) inclusive at 100+3*60=280
-    r2 = life.evaluate(
-        setup, r1.instance, [], candle_epoch=280, timeframe_seconds=TF_SEC
+    # elapsed=3 (>=3) inclusive at 280
+    r = life.evaluate(
+        setup, r.instance, [], candle_epoch=280, timeframe_seconds=TF_SEC
     )
-    assert r2.transitioned is True
-    assert r2.instance.state == LifecycleState.EXPIRED
+    assert r.transitioned is True
+    assert r.instance.state == LifecycleState.EXPIRED
 
 
 def test_invalidation_beats_expiry(life):
@@ -421,9 +422,100 @@ def test_expiry_misaligned_epoch_does_not_expire(life):
     )
     inst = new_pending_instance(setup, instance_key="1")
     r0 = life.evaluate(setup, inst, [], candle_epoch=100, timeframe_seconds=TF_SEC)
-    # 150 is not on the 60s grid from 100
+    # 150 is discontinuous / not next candle
     r1 = life.evaluate(
         setup, r0.instance, [], candle_epoch=150, timeframe_seconds=TF_SEC
     )
+    assert r1.diagnostic_only is True
     assert r1.instance.state == LifecycleState.PENDING
+    assert r1.instance.last_evaluation_candle == 100
+
+
+def test_missing_timeframe_seconds_with_expiry_is_diagnostic(life):
+    setup = _setup(
+        ObservationRequirement(type="a"),
+        expiry=ExpiryConfig(max_age_candles=5),
+    )
+    inst = new_pending_instance(setup, instance_key="1")
+    r = life.evaluate(
+        setup, inst, [_obs("a", 100)], candle_epoch=100, timeframe_seconds=None
+    )
+    assert r.diagnostic_only is True
+    assert r.transitioned is False
+    assert r.instance.state == LifecycleState.PENDING
+    assert "timeframe_seconds" in r.reasons[0]
+
+
+def test_skipped_candle_rejected_with_expiry_and_qualifying_expr(life):
+    setup = _setup(
+        ObservationRequirement(type="a"),
+        expiry=ExpiryConfig(max_age_candles=10),
+    )
+    inst = new_pending_instance(setup, instance_key="1")
+    r0 = life.evaluate(setup, inst, [], candle_epoch=100, timeframe_seconds=TF_SEC)
+    # Skip 160; jump to 220 with qualifying observation
+    r1 = life.evaluate(
+        setup,
+        r0.instance,
+        [_obs("a", 220)],
+        candle_epoch=220,
+        timeframe_seconds=TF_SEC,
+    )
+    assert r1.diagnostic_only is True
     assert r1.transitioned is False
+    assert r1.instance.state == LifecycleState.PENDING
+    assert r1.instance.last_evaluation_candle == 100
+    assert "discontinuous" in r1.reasons[0]
+
+
+def test_config_id_mismatch_rejected(life):
+    setup_a = _setup(ObservationRequirement(type="a"), setup_id="a")
+    setup_b = _setup(ObservationRequirement(type="b"), setup_id="b")
+    inst = new_pending_instance(setup_a, instance_key="1")
+    r = life.evaluate(
+        setup_b, inst, [_obs("b", 100)], candle_epoch=100, timeframe_seconds=TF_SEC
+    )
+    assert r.diagnostic_only is True
+    assert r.transitioned is False
+    assert r.instance.state == LifecycleState.PENDING
+    assert "mismatch" in r.reasons[0]
+
+
+def test_simultaneous_invalidation_and_expiry_preserves_both_reasons(life):
+    setup = _setup(
+        ObservationRequirement(type="never"),
+        invalidation=ObservationRequirement(type="kill"),
+        expiry=ExpiryConfig(max_age_candles=1),
+    )
+    inst = new_pending_instance(setup, instance_key="1")
+    r0 = life.evaluate(setup, inst, [], candle_epoch=100, timeframe_seconds=TF_SEC)
+    r1 = life.evaluate(
+        setup,
+        r0.instance,
+        [_obs("kill", 160)],
+        candle_epoch=160,
+        timeframe_seconds=TF_SEC,
+    )
+    assert r1.instance.state == LifecycleState.INVALIDATED
+    joined = " ".join(r1.reasons)
+    assert "invalidation" in joined
+    assert "expiry" in joined
+
+
+def test_disabled_setup_does_not_transition(life):
+    setup = SetupDef(
+        schema_version=SCHEMA_VERSION_V1,
+        setup_id="s1",
+        symbol=SYMBOL,
+        timeframe=TF,
+        enabled=False,
+        expression=ObservationRequirement(type="a"),
+    )
+    inst = new_pending_instance(setup, instance_key="1")
+    r = life.evaluate(
+        setup, inst, [_obs("a", 100)], candle_epoch=100, timeframe_seconds=TF_SEC
+    )
+    assert r.diagnostic_only is True
+    assert r.transitioned is False
+    assert r.instance.state == LifecycleState.PENDING
+    assert "disabled" in r.reasons[0]
