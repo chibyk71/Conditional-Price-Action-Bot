@@ -486,6 +486,246 @@ def test_unhealthy_series_does_not_advance():
     assert inst.last_evaluation_candle == ep0
 
 
+class _RaisingCacheMarket:
+    """Market double that can raise from get_cache / is_series_healthy / series_ok."""
+
+    def __init__(
+        self,
+        candles,
+        *,
+        raise_get_cache: bool = False,
+        cache_none: bool = False,
+        raise_is_healthy: bool = False,
+        raise_series_ok: bool = False,
+        omit_series_ok: bool = False,
+        omit_get_cache: bool = False,
+    ):
+        self._candles = list(candles)
+        self._raise_get_cache = raise_get_cache
+        self._cache_none = cache_none
+        self._raise_is_healthy = raise_is_healthy
+        self._raise_series_ok = raise_series_ok
+        self._omit_series_ok = omit_series_ok
+        self._omit_get_cache = omit_get_cache
+        self._gran_by_name = {TF: TF_SEC}
+
+    def completed_candles(self, symbol, timeframe):
+        return [
+            c
+            for c in self._candles
+            if c.is_closed and c.symbol == symbol and c.timeframe == timeframe
+        ]
+
+    def timeframe_seconds(self, timeframe: str):
+        return TF_SEC if timeframe == TF else None
+
+    def get_cache(self, symbol, timeframe):
+        if self._omit_get_cache:
+            raise AttributeError("get_cache omitted")  # not used if deleted
+        if self._raise_get_cache:
+            raise RuntimeError("cache lookup failed")
+        if self._cache_none:
+            return None
+
+        class _Cache:
+            def __init__(self, parent):
+                self._parent = parent
+
+            def is_series_healthy(self, min_candles=1):
+                if self._parent._raise_is_healthy:
+                    raise RuntimeError("health check exploded")
+                return True
+
+            def quarantine_epochs(self):
+                return set()
+
+        return _Cache(self)
+
+    def series_ok(self, symbol, timeframe):
+        if self._raise_series_ok:
+            raise RuntimeError("series_ok exploded")
+        return True
+
+
+def _strip_attr(obj, name: str):
+    """Remove an attribute so getattr(..., None) treats it as missing."""
+    if hasattr(obj, name):
+        try:
+            delattr(obj, name)
+        except Exception:
+            # Bound methods on class — override instance dict with non-callable
+            object.__setattr__(obj, name, None)
+
+
+def test_get_cache_exception_does_not_advance():
+    ep0 = START
+    ep1 = START + 60
+    setup = _setup(
+        ThenExpression(
+            steps=(
+                ThenStep(expression=ObservationRequirement(type="a")),
+                ThenStep(expression=ObservationRequirement(type="b")),
+            )
+        ),
+        setup_id="cache_exc",
+    )
+    market = _RaisingCacheMarket(_candles_up_to(ep0))
+    det = ScriptedDetector(
+        {ep0: [_obs("a", ep0)], ep1: [_obs("b", ep1)]}
+    )
+    engine = _engine(market, setups=[setup], detectors=[det])
+    assert engine.evaluate_once() == []
+    assert engine.get_instance("cache_exc").state == LifecycleState.IN_PROGRESS
+    prior = engine.get_instance("cache_exc").last_evaluation_candle
+
+    market._candles = _candles_up_to(ep1)
+    market._raise_get_cache = True
+    assert engine.evaluate_once() == []
+    inst = engine.get_instance("cache_exc")
+    assert inst.state == LifecycleState.IN_PROGRESS
+    assert inst.last_evaluation_candle == prior == ep0
+
+
+def test_is_series_healthy_exception_does_not_advance():
+    ep0 = START
+    ep1 = START + 60
+    setup = _setup(
+        ThenExpression(
+            steps=(
+                ThenStep(expression=ObservationRequirement(type="a")),
+                ThenStep(expression=ObservationRequirement(type="b")),
+            )
+        ),
+        setup_id="health_exc",
+    )
+    market = _RaisingCacheMarket(_candles_up_to(ep0))
+    det = ScriptedDetector(
+        {ep0: [_obs("a", ep0)], ep1: [_obs("b", ep1)]}
+    )
+    engine = _engine(market, setups=[setup], detectors=[det])
+    assert engine.evaluate_once() == []
+    assert engine.get_instance("health_exc").state == LifecycleState.IN_PROGRESS
+
+    market._candles = _candles_up_to(ep1)
+    market._raise_is_healthy = True
+    # Prefer cache path; strip series_ok so failure is not masked
+    object.__setattr__(market, "series_ok", None)
+    assert engine.evaluate_once() == []
+    inst = engine.get_instance("health_exc")
+    assert inst.state == LifecycleState.IN_PROGRESS
+    assert inst.last_evaluation_candle == ep0
+
+
+def test_get_cache_none_does_not_advance():
+    ep0 = START
+    ep1 = START + 60
+    setup = _setup(
+        ThenExpression(
+            steps=(
+                ThenStep(expression=ObservationRequirement(type="a")),
+                ThenStep(expression=ObservationRequirement(type="b")),
+            )
+        ),
+        setup_id="cache_none",
+    )
+    market = _RaisingCacheMarket(_candles_up_to(ep0))
+    det = ScriptedDetector(
+        {ep0: [_obs("a", ep0)], ep1: [_obs("b", ep1)]}
+    )
+    engine = _engine(market, setups=[setup], detectors=[det])
+    assert engine.evaluate_once() == []
+    assert engine.get_instance("cache_none").state == LifecycleState.IN_PROGRESS
+
+    market._candles = _candles_up_to(ep1)
+    market._cache_none = True
+    object.__setattr__(market, "series_ok", None)
+    assert engine.evaluate_once() == []
+    inst = engine.get_instance("cache_none")
+    assert inst.state == LifecycleState.IN_PROGRESS
+    assert inst.last_evaluation_candle == ep0
+
+
+def test_series_ok_exception_does_not_advance():
+    ep0 = START
+    ep1 = START + 60
+    setup = _setup(
+        ThenExpression(
+            steps=(
+                ThenStep(expression=ObservationRequirement(type="a")),
+                ThenStep(expression=ObservationRequirement(type="b")),
+            )
+        ),
+        setup_id="series_ok_exc",
+    )
+    # No get_cache — only series_ok path
+    market = FakeMarket(_candles_up_to(ep0), series_healthy=True)
+    det = ScriptedDetector(
+        {ep0: [_obs("a", ep0)], ep1: [_obs("b", ep1)]}
+    )
+    engine = _engine(market, setups=[setup], detectors=[det])
+    assert engine.evaluate_once() == []
+    assert engine.get_instance("series_ok_exc").state == LifecycleState.IN_PROGRESS
+
+    market.set_candles(_candles_up_to(ep1))
+
+    def _boom(symbol, timeframe):
+        raise RuntimeError("series_ok exploded")
+
+    market.series_ok = _boom  # type: ignore[method-assign]
+    assert engine.evaluate_once() == []
+    inst = engine.get_instance("series_ok_exc")
+    assert inst.state == LifecycleState.IN_PROGRESS
+    assert inst.last_evaluation_candle == ep0
+
+
+def test_missing_health_interface_does_not_advance():
+    """No get_cache and no series_ok → cannot verify health → no advancement."""
+    ep0 = START
+    ep1 = START + 60
+    setup = _setup(
+        ThenExpression(
+            steps=(
+                ThenStep(expression=ObservationRequirement(type="a")),
+                ThenStep(expression=ObservationRequirement(type="b")),
+            )
+        ),
+        setup_id="no_health",
+    )
+
+    class BareMarket:
+        def __init__(self, candles):
+            self._candles = list(candles)
+            self._gran_by_name = {TF: TF_SEC}
+
+        def completed_candles(self, symbol, timeframe):
+            return [
+                c
+                for c in self._candles
+                if c.is_closed and c.symbol == symbol and c.timeframe == timeframe
+            ]
+
+        def timeframe_seconds(self, timeframe: str):
+            return TF_SEC if timeframe == TF else None
+
+    # First evaluation also requires health; with no interface, stays PENDING
+    market = BareMarket(_candles_up_to(ep0))
+    det = ScriptedDetector(
+        {ep0: [_obs("a", ep0)], ep1: [_obs("b", ep1)]}
+    )
+    engine = _engine(market, setups=[setup], detectors=[det])
+    assert engine.evaluate_once() == []
+    inst = engine.get_instance("no_health")
+    assert inst.state == LifecycleState.PENDING
+    assert inst.last_evaluation_candle is None
+
+    # Still cannot advance on next bar
+    market._candles = _candles_up_to(ep1)
+    assert engine.evaluate_once() == []
+    inst = engine.get_instance("no_health")
+    assert inst.state == LifecycleState.PENDING
+    assert inst.last_evaluation_candle is None
+
+
 def test_discontinuous_candle_does_not_advance():
     ep0 = START
     # Skip ep0+60; jump to ep0+120
