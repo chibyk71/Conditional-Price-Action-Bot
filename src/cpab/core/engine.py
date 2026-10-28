@@ -352,56 +352,96 @@ class ConditionEngine:
     ) -> tuple[bool, tuple[str, ...]]:
         """Return (data_ok, diagnostics) for lifecycle evaluation.
 
-        When the market exposes a healthy series check, use it. Otherwise assume
-        ok (readiness already gated evaluation). Quarantine / gap issues must
-        not advance lifecycle state.
+        Fail-closed: when series health cannot be verified (missing interface,
+        lookup failure, or check exception), return data_ok=False so lifecycle
+        state does not advance. Explicit unhealthy / quarantine also blocks.
         """
         market = self.market
+        saw_health_interface = False
+
         get_cache = getattr(market, "get_cache", None)
         if callable(get_cache):
+            saw_health_interface = True
             try:
                 cache = get_cache(symbol, timeframe)
-            except Exception:
-                return True, ()
+            except Exception as exc:
+                return False, (
+                    f"get_cache failed: {type(exc).__name__}: {exc}",
+                )
             if cache is None:
-                return True, ()
-            # Prefer explicit health if present
+                return False, (
+                    "get_cache returned None; cannot verify series health",
+                )
+
             is_healthy = getattr(cache, "is_series_healthy", None)
             if callable(is_healthy):
                 min_c = getattr(market, "min_candles", 1) or 1
                 try:
-                    ok = bool(is_healthy(min_c))
-                except TypeError:
                     try:
+                        ok = bool(is_healthy(min_c))
+                    except TypeError:
                         ok = bool(is_healthy())
-                    except Exception:
-                        ok = True
+                except Exception as exc:
+                    return False, (
+                        f"is_series_healthy failed: {type(exc).__name__}: {exc}",
+                    )
                 if not ok:
-                    q = getattr(cache, "quarantine_epochs", None)
                     detail = "series unhealthy"
+                    q = getattr(cache, "quarantine_epochs", None)
                     if callable(q):
-                        epochs = q()
-                        if epochs:
-                            detail = f"series unhealthy; quarantine={sorted(epochs)[:5]}"
+                        try:
+                            epochs = q()
+                            if epochs:
+                                detail = (
+                                    f"series unhealthy; quarantine="
+                                    f"{sorted(epochs)[:5]}"
+                                )
+                        except Exception:
+                            pass
                     return False, (detail,)
-            # Quarantine alone is sufficient to block advancement
+
             q = getattr(cache, "quarantine_epochs", None)
             if callable(q):
-                epochs = q()
+                try:
+                    epochs = q()
+                except Exception as exc:
+                    return False, (
+                        f"quarantine_epochs failed: {type(exc).__name__}: {exc}",
+                    )
                 if epochs:
                     return False, (
                         f"quarantined epochs present: {sorted(epochs)[:5]}",
                     )
-        # Test doubles may expose series_ok(symbol, timeframe)
+
+            # Cache path with a successful is_series_healthy check is sufficient.
+            if callable(is_healthy):
+                return True, ()
+            # Cache present but no health method — try series_ok below; if that
+            # is also absent, fall through to the unverifiable failure.
+
         series_ok = getattr(market, "series_ok", None)
         if callable(series_ok):
+            saw_health_interface = True
             try:
                 ok = bool(series_ok(symbol, timeframe))
-                if not ok:
-                    return False, ("series_ok reported False",)
-            except Exception:
-                pass
-        return True, ()
+            except Exception as exc:
+                return False, (
+                    f"series_ok failed: {type(exc).__name__}: {exc}",
+                )
+            if not ok:
+                return False, ("series_ok reported False",)
+            return True, ()
+
+        if not saw_health_interface:
+            return False, (
+                "no series health interface available "
+                "(get_cache/is_series_healthy or series_ok); "
+                "cannot verify data health",
+            )
+        return False, (
+            "cache present but no is_series_healthy or series_ok; "
+            "cannot verify data health",
+        )
 
     @property
     def last_observations(self) -> list[Observation]:
