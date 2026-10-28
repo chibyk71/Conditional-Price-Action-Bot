@@ -63,8 +63,8 @@ def test_valid_optional_and_reserved_fields():
         "enabled": False,
         "name": "Example",
         "description": "desc only",
-        "invalidation": {"schema_version": 1, "rules": []},
-        "expiry": {"schema_version": 1, "bars": 50},
+        "invalidation": {"type": "structure_break"},
+        "expiry": {"max_age_candles": 50},
         "expression": {
             "op": "and",
             "children": [
@@ -77,8 +77,11 @@ def test_valid_optional_and_reserved_fields():
     assert setup.enabled is False
     assert setup.name == "Example"
     assert setup.description == "desc only"
-    assert setup.invalidation == {"schema_version": 1, "rules": []}
-    assert setup.expiry == {"schema_version": 1, "bars": 50}
+    from cpab.conditions.expression import ObservationRequirement
+    from cpab.conditions.schema import ExpiryConfig
+    assert isinstance(setup.invalidation, ObservationRequirement)
+    assert setup.invalidation.type == "structure_break"
+    assert setup.expiry == ExpiryConfig(max_age_candles=50)
     assert isinstance(setup.expression, AndExpression)
     assert len(setup.expression.children) == 2
 
@@ -593,7 +596,7 @@ def test_setup_id_stable_when_identity_changes():
 
 def test_reserved_fields_affect_identity_when_present():
     a = _sample_setup()
-    b = _sample_setup(invalidation={"schema_version": 1})
+    b = _sample_setup(invalidation={"type": "structure_break"})
     assert setup_config_identity(a) != setup_config_identity(b)
 
 
