@@ -7,7 +7,9 @@ from typing import Optional
 import pytest
 
 from cpab.conditions.expression import (
+    AndExpression,
     ObservationRequirement,
+    OrExpression,
     ThenExpression,
     ThenStep,
 )
@@ -267,9 +269,15 @@ def test_empty_candles_series_appears_in_snapshot():
     assert any("no completed candles" in d for d in sv.diagnostics)
 
 
-def test_gap_stale_data_diagnostic_no_false_signal():
+def test_gap_discontinuous_evaluation_diagnostic_no_false_signal():
+    """Lifecycle continuity gap: skip an evaluation interval after IN_PROGRESS.
+
+    Engine mechanism: SetupLifecycleEvaluator rejects candle_epoch that is not
+    last_evaluation_candle + timeframe_seconds (diagnostic_only). Series health
+    may still report data_ok; the discontinuity is exposed on the setup view.
+    """
     ep0 = START
-    gap_epoch = START + 120
+    gap_epoch = START + 2 * TF_SEC
     setup = _setup(
         ThenExpression(steps=(
             ThenStep(expression=ObservationRequirement(type="a")),
@@ -281,12 +289,57 @@ def test_gap_stale_data_diagnostic_no_false_signal():
     det = ScriptedDetector({ep0: [_obs("a", ep0)], gap_epoch: [_obs("b", gap_epoch)]})
     engine = _engine(market, setups=[setup], detectors=[det])
     assert engine.evaluate_once() == []
+    assert engine.get_instance("gap_mon").state == LifecycleState.IN_PROGRESS
+    assert engine.get_instance("gap_mon").last_evaluation_candle == ep0
+
     market.set_candles(_candles_up_to(gap_epoch))
-    assert engine.evaluate_once() == []
+    sigs = engine.evaluate_once()
+    assert sigs == []
     snap = engine.last_monitoring_snapshot
     assert snap.signal_count == 0
-    assert snap.setups[0].state == LifecycleState.IN_PROGRESS.value
+    assert snap.signal_ids == ()
+    assert len(snap.series) >= 1
+    assert snap.series[0].evaluation_candle_epoch == gap_epoch
+    sv = snap.setups[0]
+    assert sv.setup_id == "gap_mon"
+    assert sv.state == LifecycleState.IN_PROGRESS.value
+    assert sv.diagnostic_only is True
+    assert sv.transitioned is False
+    assert any("discontinuous" in r for r in sv.reasons)
     assert engine.get_instance("gap_mon").last_evaluation_candle == ep0
+    assert engine.get_instance("gap_mon").state != LifecycleState.COMPLETED
+
+
+def test_stale_evaluation_candle_diagnostic_no_false_signal():
+    """Stale candle (epoch < last_evaluation) is diagnostic-only; no false signal."""
+    ep0 = START
+    ep1 = START + TF_SEC
+    setup = _setup(
+        ThenExpression(steps=(
+            ThenStep(expression=ObservationRequirement(type="a")),
+            ThenStep(expression=ObservationRequirement(type="b")),
+        )),
+        setup_id="stale_mon",
+    )
+    market = FakeMarket(_candles_up_to(ep1))
+    det = ScriptedDetector({ep1: [_obs("a", ep1)]})
+    engine = _engine(market, setups=[setup], detectors=[det])
+    assert engine.evaluate_once() == []
+    assert engine.get_instance("stale_mon").state == LifecycleState.IN_PROGRESS
+    assert engine.get_instance("stale_mon").last_evaluation_candle == ep1
+
+    market.set_candles(_candles_up_to(ep0))
+    det._by_epoch[ep0] = [_obs("b", ep0)]
+    sigs = engine.evaluate_once()
+    assert sigs == []
+    snap = engine.last_monitoring_snapshot
+    assert snap.signal_count == 0
+    sv = snap.setups[0]
+    assert sv.state == LifecycleState.IN_PROGRESS.value
+    assert sv.diagnostic_only is True
+    assert sv.transitioned is False
+    assert any("stale" in r for r in sv.reasons)
+    assert engine.get_instance("stale_mon").last_evaluation_candle == ep1
 
 
 def test_invalidation_terminal_no_false_completion_in_snapshot():
@@ -450,3 +503,72 @@ def test_legacy_condition_signal_appears_in_snapshot():
     snap = engine.last_monitoring_snapshot
     assert snap.signal_count == 1
     assert snap.signal_ids == (sigs[0].id,)
+
+
+def test_and_expression_incomplete_then_completes_in_snapshot():
+    """AND does not complete until all children are satisfied; snapshot tracks both cycles."""
+    ep = START + TF_SEC
+    setup = _setup(
+        AndExpression(children=(
+            ObservationRequirement(type="a"),
+            ObservationRequirement(type="b"),
+        )),
+        setup_id="and_mon",
+    )
+    market = FakeMarket(_candles_up_to(ep))
+    det = ScriptedDetector({ep: [_obs("a", ep)]})
+    engine = _engine(market, setups=[setup], detectors=[det])
+    sigs = engine.evaluate_once()
+    assert sigs == []
+    snap = engine.last_monitoring_snapshot
+    assert snap.signal_count == 0
+    sv = snap.setups[0]
+    assert sv.setup_id == "and_mon"
+    assert sv.state == LifecycleState.PENDING.value
+    assert sv.transitioned is False
+
+    ep2 = ep + TF_SEC
+    market.set_candles(_candles_up_to(ep2))
+    det._by_epoch[ep2] = [_obs("a", ep2, oid="a2"), _obs("b", ep2, oid="b2")]
+    sigs2 = engine.evaluate_once()
+    assert len(sigs2) == 1
+    snap2 = engine.last_monitoring_snapshot
+    assert snap2.signal_count == 1
+    assert snap2.signal_ids == (sigs2[0].id,)
+    sv2 = snap2.setups[0]
+    assert sv2.state == LifecycleState.COMPLETED.value
+    assert sv2.transitioned is True
+    assert sv2.diagnostic_only is False
+
+
+def test_or_expression_incomplete_then_one_branch_completes_in_snapshot():
+    """OR does not complete before any branch; one valid branch completes."""
+    ep = START + TF_SEC
+    setup = _setup(
+        OrExpression(children=(
+            ObservationRequirement(type="a"),
+            ObservationRequirement(type="b"),
+        )),
+        setup_id="or_mon",
+    )
+    market = FakeMarket(_candles_up_to(ep))
+    det = ScriptedDetector({ep: [_obs("x", ep)]})
+    engine = _engine(market, setups=[setup], detectors=[det])
+    sigs = engine.evaluate_once()
+    assert sigs == []
+    snap = engine.last_monitoring_snapshot
+    assert snap.signal_count == 0
+    assert snap.setups[0].state == LifecycleState.PENDING.value
+    assert snap.setups[0].transitioned is False
+
+    ep2 = ep + TF_SEC
+    market.set_candles(_candles_up_to(ep2))
+    det._by_epoch[ep2] = [_obs("b", ep2)]
+    sigs2 = engine.evaluate_once()
+    assert len(sigs2) == 1
+    snap2 = engine.last_monitoring_snapshot
+    assert snap2.signal_count == 1
+    assert snap2.signal_ids == (sigs2[0].id,)
+    sv2 = snap2.setups[0]
+    assert sv2.state == LifecycleState.COMPLETED.value
+    assert sv2.transitioned is True
