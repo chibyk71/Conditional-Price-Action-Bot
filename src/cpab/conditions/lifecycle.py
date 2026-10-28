@@ -198,12 +198,21 @@ class SetupLifecycleEvaluator:
                 reasons=("idempotent: evaluation candle already accepted",),
             )
 
-        # Continuity: next accepted candle must be exactly one step after last
-        if (
-            instance.last_evaluation_candle is not None
-            and timeframe_seconds is not None
-            and timeframe_seconds > 0
-        ):
+        # Continuity requires timeframe context whenever a prior candle was accepted.
+        # Without it we cannot prove the event is contiguous, so reject diagnostically
+        # (including when expiry is not configured).
+        if instance.last_evaluation_candle is not None:
+            if timeframe_seconds is None or timeframe_seconds <= 0:
+                return LifecycleEvalResult(
+                    instance=instance,
+                    transitioned=False,
+                    previous_state=previous,
+                    reasons=(
+                        "timeframe_seconds missing or non-positive; cannot "
+                        "validate candle continuity; lifecycle state unchanged",
+                    ),
+                    diagnostic_only=True,
+                )
             expected = instance.last_evaluation_candle + timeframe_seconds
             if candle_epoch != expected:
                 return LifecycleEvalResult(
@@ -219,7 +228,8 @@ class SetupLifecycleEvaluator:
                     diagnostic_only=True,
                 )
 
-        # Expiry configured requires evaluable timeframe context
+        # First accepted evaluation with expiry still needs timeframe for later steps
+        # and for computing elapsed candles on this event.
         if setup.expiry is not None and (
             timeframe_seconds is None or timeframe_seconds <= 0
         ):

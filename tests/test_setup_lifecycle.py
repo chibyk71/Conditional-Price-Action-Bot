@@ -519,3 +519,37 @@ def test_disabled_setup_does_not_transition(life):
     assert r.transitioned is False
     assert r.instance.state == LifecycleState.PENDING
     assert "disabled" in r.reasons[0]
+
+
+def test_skipped_candle_without_expiry_rejected(life):
+    """Continuity applies even when expiry is not configured."""
+    setup = _setup(ObservationRequirement(type="a"))
+    inst = new_pending_instance(setup, instance_key="1")
+    r0 = life.evaluate(setup, inst, [], candle_epoch=100, timeframe_seconds=TF_SEC)
+    assert r0.instance.last_evaluation_candle == 100
+
+    # Omit timeframe_seconds and skip to 220 with qualifying obs
+    r1 = life.evaluate(
+        setup,
+        r0.instance,
+        [_obs("a", 220)],
+        candle_epoch=220,
+        timeframe_seconds=None,
+    )
+    assert r1.diagnostic_only is True
+    assert r1.transitioned is False
+    assert r1.instance.state == LifecycleState.PENDING
+    assert r1.instance.last_evaluation_candle == 100
+    assert r1.instance.progress == r0.instance.progress
+
+    # Same skip with timeframe provided still rejected
+    r2 = life.evaluate(
+        setup,
+        r0.instance,
+        [_obs("a", 220)],
+        candle_epoch=220,
+        timeframe_seconds=TF_SEC,
+    )
+    assert r2.diagnostic_only is True
+    assert r2.instance.state == LifecycleState.PENDING
+    assert r2.instance.last_evaluation_candle == 100
