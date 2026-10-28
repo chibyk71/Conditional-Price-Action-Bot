@@ -42,12 +42,14 @@ def _deterministic_setup_signal_id(instance_id: str, candle_epoch: int) -> str:
 
 class ConditionEngine:
     """
-    Runs detectors on completed candles only when readiness is READY.
-    Retains observations across cycles (ObservationStore) so multi-component
-    conditions/setups can combine facts confirmed on different bars.
-    Evaluates legacy conditions and Phase 7A–7C setups, emitting explainable
-    signals only when a setup instance transitions to COMPLETED (or a legacy
-    condition is met).
+    Runs detectors on completed candles only when readiness is READY and the
+    series data-health check succeeds. Unhealthy or unverifiable series data
+    skips detectors, store acceptance, and both legacy and setup signal paths
+    for that cycle (setup lifecycle may still receive a diagnostic-only eval).
+    Retains observations across healthy cycles (ObservationStore) so
+    multi-component conditions/setups can combine facts confirmed on different
+    bars. Emits explainable signals only when a setup instance transitions to
+    COMPLETED or a legacy condition is met on healthy data.
     Deduplicates signals for the same (condition_id, candle_epoch) [legacy] or
     (instance_id, candle_epoch) [setups].
 
@@ -145,6 +147,50 @@ class ConditionEngine:
             if not candles:
                 continue
 
+            latest = candles[-1]
+            # Series health gates the entire evaluation cycle for this series:
+            # detectors, store acceptance, legacy conditions, and setup lifecycle
+            # activation/completion. Unhealthy or unverifiable data must not
+            # introduce retained evidence or emit signals.
+            data_ok, data_diagnostics = self._series_data_health(symbol, timeframe)
+            tf_sec = self._resolve_timeframe_seconds(timeframe)
+
+            if not data_ok:
+                logger.debug(
+                    "Series %s/%s data not ok; skip detect/store/legacy reasons=%s",
+                    symbol,
+                    timeframe,
+                    data_diagnostics,
+                )
+                # Age-based prune may still run relative to market time.
+                self.store.prune(latest.epoch)
+                eval_obs = self.store.query(symbol, timeframe)
+                # Setup lifecycle: diagnostic-only (no state advancement).
+                relevant_setups = [
+                    s
+                    for s in self.setups
+                    if s.symbol == symbol and s.timeframe == timeframe
+                ]
+                for setup in relevant_setups:
+                    instance = self._instances.get(setup.setup_id)
+                    if instance is None:
+                        instance = new_pending_instance(
+                            setup, instance_key=_DEFAULT_INSTANCE_KEY
+                        )
+                        self._instances[setup.setup_id] = instance
+                    life_result = self.lifecycle.evaluate(
+                        setup,
+                        instance,
+                        eval_obs,
+                        candle_epoch=latest.epoch,
+                        evaluation_time=latest.epoch,
+                        timeframe_seconds=tf_sec,
+                        data_ok=False,
+                        data_diagnostics=data_diagnostics,
+                    )
+                    self._instances[setup.setup_id] = life_result.instance
+                continue
+
             # Detectors only see completed candles; emissions are new for this cycle
             new_obs: list[Observation] = []
             for det in self.detectors:
@@ -155,14 +201,13 @@ class ConditionEngine:
             # Retain newly emitted facts for future bars (deduped by id)
             self.store.accept(new_obs)
 
-            latest = candles[-1]
             # Age-based prune relative to current market time
             self.store.prune(latest.epoch)
 
             # Evaluation set = all retained observations for this series
             eval_obs = self.store.query(symbol, timeframe)
 
-            # --- Legacy conditions (unchanged semantics) ---
+            # --- Legacy conditions ---
             relevant = [
                 c
                 for c in self.conditions
@@ -204,8 +249,6 @@ class ConditionEngine:
                 for s in self.setups
                 if s.symbol == symbol and s.timeframe == timeframe
             ]
-            tf_sec = self._resolve_timeframe_seconds(timeframe)
-            data_ok, data_diagnostics = self._series_data_health(symbol, timeframe)
 
             for setup in relevant_setups:
                 instance = self._instances.get(setup.setup_id)
