@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from cpab.adapters.deriv_ws import DerivWebSocketAdapter
-from cpab.config import conditions_from_config, load_config
+from cpab.config import conditions_from_config, load_config, setups_from_config
 from cpab.core.engine import ConditionEngine
 from cpab.detectors.engulfing import EngulfingDetector
 from cpab.logging_setup import get_logger, setup_logging
@@ -46,8 +46,11 @@ async def run(config_path: str, once: bool = False) -> int:
     )
 
     conditions = conditions_from_config(cfg)
+    setups = setups_from_config(cfg)
     detectors = [EngulfingDetector()]
-    engine = ConditionEngine(market, detectors, conditions, readiness)
+    engine = ConditionEngine(
+        market, detectors, conditions, readiness, setups=setups
+    )
 
     stop = asyncio.Event()
 
