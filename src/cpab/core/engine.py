@@ -14,6 +14,12 @@ from cpab.conditions.lifecycle import (
     new_pending_instance,
 )
 from cpab.conditions.schema import SetupDef
+from cpab.core.monitoring import (
+    MonitoringSnapshot,
+    SeriesCycleView,
+    build_setup_views,
+    empty_monitoring_snapshot,
+)
 from cpab.core.observation_store import ObservationStore
 from cpab.detectors.base import PriceActionDetector
 from cpab.market.readiness import ReadinessManager
@@ -23,44 +29,19 @@ from cpab.logging_setup import get_logger
 
 logger = get_logger("cpab.core.engine")
 
-# Default retention: keep up to 1000 observations; age out after ~7 days of
-# market seconds so multi-component setups spanning many bars remain available
-# without unbounded growth. Callers may override via observation_store=.
 _DEFAULT_MAX_SIZE = 1000
 _DEFAULT_MAX_AGE_SECONDS = 7 * 24 * 3600
-
-# Default instance key when the engine owns a single instance per setup config.
 _DEFAULT_INSTANCE_KEY = "default"
 
 
 def _deterministic_setup_signal_id(instance_id: str, candle_epoch: int) -> str:
-    """Stable signal id for a setup completion (no randomness / wall-clock)."""
     payload = f"{instance_id}:{candle_epoch}:completed"
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return f"sigsetup:{digest[:24]}"
 
 
 class ConditionEngine:
-    """
-    Runs detectors on completed candles only when readiness is READY and the
-    series data-health check succeeds. Unhealthy or unverifiable series data
-    skips detectors, store acceptance, and both legacy and setup signal paths
-    for that cycle (setup lifecycle may still receive a diagnostic-only eval).
-    Retains observations across healthy cycles (ObservationStore) so
-    multi-component conditions/setups can combine facts confirmed on different
-    bars. Emits explainable signals only when a setup instance transitions to
-    COMPLETED or a legacy condition is met on healthy data.
-    Deduplicates signals for the same (condition_id, candle_epoch) [legacy] or
-    (instance_id, candle_epoch) [setups].
-
-    Activation vs retention:
-      - Store retains prior confirmed observations for causal availability.
-      - Evaluator activation still requires at least one supporting observation
-        newly associated with evaluation bar T (confirmed_at == T, etc.).
-      - Retained priors alone never re-fire a condition on a later bar.
-      - Setup lifecycle state is owned by the engine (one default instance per
-        setup_id unless callers inject pre-built instances).
-    """
+    """Runs detectors on completed candles; Phase 7E monitoring is observational."""
 
     def __init__(
         self,
@@ -81,10 +62,8 @@ class ConditionEngine:
         self.readiness = readiness
         self.evaluator = ConditionEvaluator()
         self.lifecycle = lifecycle_evaluator or SetupLifecycleEvaluator()
-        self._emitted: set[tuple[str, int]] = set()  # (condition_id|instance_id, candle_epoch)
+        self._emitted: set[tuple[str, int]] = set()
         self._last_observations: list[Observation] = []
-        # Use explicit None check — ObservationStore defines __len__ so an
-        # empty store is falsy and must not be replaced by a new instance.
         self.store = (
             observation_store
             if observation_store is not None
@@ -93,23 +72,28 @@ class ConditionEngine:
                 max_age_seconds=_DEFAULT_MAX_AGE_SECONDS,
             )
         )
-        # Optional explicit map; otherwise derived from market when possible.
         self._tf_seconds: dict[str, int] = dict(timeframe_seconds_by_name or {})
-        # setup_id -> SetupInstance (engine-owned lifecycle state)
         self._instances: dict[str, SetupInstance] = {}
         for s in self.setups:
             if s.setup_id not in self._instances:
                 self._instances[s.setup_id] = new_pending_instance(
                     s, instance_key=_DEFAULT_INSTANCE_KEY
                 )
+        self._monitoring: MonitoringSnapshot = empty_monitoring_snapshot(
+            readiness_state=self.readiness.state.value,
+            readiness_reason=self.readiness.reason,
+        )
 
     @property
     def setup_instances(self) -> dict[str, SetupInstance]:
-        """Current lifecycle instances keyed by setup_id (copy of mapping)."""
         return dict(self._instances)
 
     def get_instance(self, setup_id: str) -> Optional[SetupInstance]:
         return self._instances.get(setup_id)
+
+    @property
+    def last_monitoring_snapshot(self) -> MonitoringSnapshot:
+        return self._monitoring
 
     def evaluate_once(self) -> list[Signal]:
         if not self.readiness.can_evaluate():
@@ -118,23 +102,22 @@ class ConditionEngine:
                 self.readiness.state.value,
                 self.readiness.reason,
             )
+            self._record_blocked_cycle()
             return []
 
         signals: list[Signal] = []
         cycle_new: list[Observation] = []
+        newly_accepted_ids: list[str] = []
+        series_views: list[SeriesCycleView] = []
+        setup_outcomes: dict[str, dict] = {}
 
-        # Union of (symbol, timeframe) from enabled legacy conditions and setups
         pairs: set[tuple[str, str]] = set()
         for c in self.conditions:
             if c.enabled:
                 pairs.add((c.symbol, c.timeframe))
         for s in self.setups:
-            # Disabled setups still need instance retention for inspection, but
-            # we only pull market series for enabled ones (disabled is diagnostic).
             if s.enabled:
                 pairs.add((s.symbol, s.timeframe))
-        # Always include disabled setup series if we already have an instance
-        # so continuity/diagnostic evaluation can still run when data is present.
         for s in self.setups:
             pairs.add((s.symbol, s.timeframe))
 
@@ -143,17 +126,40 @@ class ConditionEngine:
                 candles = self.market.completed_candles(symbol, timeframe)
             except KeyError:
                 logger.warning("No cache for %s/%s", symbol, timeframe)
+                series_views.append(
+                    SeriesCycleView(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        data_ok=False,
+                        diagnostics=("no cache for series; evaluation skipped",),
+                        evaluation_candle_epoch=None,
+                    )
+                )
                 continue
             if not candles:
+                series_views.append(
+                    SeriesCycleView(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        data_ok=False,
+                        diagnostics=("no completed candles; evaluation skipped",),
+                        evaluation_candle_epoch=None,
+                    )
+                )
                 continue
 
             latest = candles[-1]
-            # Series health gates the entire evaluation cycle for this series:
-            # detectors, store acceptance, legacy conditions, and setup lifecycle
-            # activation/completion. Unhealthy or unverifiable data must not
-            # introduce retained evidence or emit signals.
             data_ok, data_diagnostics = self._series_data_health(symbol, timeframe)
             tf_sec = self._resolve_timeframe_seconds(timeframe)
+            series_views.append(
+                SeriesCycleView(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    data_ok=data_ok,
+                    diagnostics=tuple(data_diagnostics),
+                    evaluation_candle_epoch=latest.epoch,
+                )
+            )
 
             if not data_ok:
                 logger.debug(
@@ -162,10 +168,8 @@ class ConditionEngine:
                     timeframe,
                     data_diagnostics,
                 )
-                # Age-based prune may still run relative to market time.
                 self.store.prune(latest.epoch)
                 eval_obs = self.store.query(symbol, timeframe)
-                # Setup lifecycle: diagnostic-only (no state advancement).
                 relevant_setups = [
                     s
                     for s in self.setups
@@ -189,25 +193,32 @@ class ConditionEngine:
                         data_diagnostics=data_diagnostics,
                     )
                     self._instances[setup.setup_id] = life_result.instance
+                    setup_outcomes[setup.setup_id] = {
+                        "previous_state": life_result.previous_state,
+                        "transitioned": life_result.transitioned,
+                        "diagnostic_only": life_result.diagnostic_only,
+                        "reasons": life_result.reasons,
+                    }
                 continue
 
-            # Detectors only see completed candles; emissions are new for this cycle
             new_obs: list[Observation] = []
             for det in self.detectors:
                 emitted = det.detect(candles)
                 new_obs.extend(emitted)
             cycle_new.extend(new_obs)
 
-            # Retain newly emitted facts for future bars (deduped by id)
+            before_ids = {o.id for o in self.store.all()}
             self.store.accept(new_obs)
+            seen_accepted: set[str] = set()
+            for o in new_obs:
+                if o.id in before_ids or o.id in seen_accepted:
+                    continue
+                seen_accepted.add(o.id)
+                newly_accepted_ids.append(o.id)
 
-            # Age-based prune relative to current market time
             self.store.prune(latest.epoch)
-
-            # Evaluation set = all retained observations for this series
             eval_obs = self.store.query(symbol, timeframe)
 
-            # --- Legacy conditions ---
             relevant = [
                 c
                 for c in self.conditions
@@ -221,11 +232,6 @@ class ConditionEngine:
                     continue
                 key = (cond.id, latest.epoch)
                 if key in self._emitted:
-                    logger.debug(
-                        "Skip duplicate signal condition=%s epoch=%s",
-                        cond.id,
-                        latest.epoch,
-                    )
                     continue
                 supporting = [
                     o for o in eval_obs if o.id in result.supporting_observation_ids
@@ -243,7 +249,6 @@ class ConditionEngine:
                     [o.type for o in supporting],
                 )
 
-            # --- Phase 7 setups (lifecycle-driven) ---
             relevant_setups = [
                 s
                 for s in self.setups
@@ -258,7 +263,6 @@ class ConditionEngine:
                     )
                     self._instances[setup.setup_id] = instance
 
-                # Disabled setups: still call lifecycle (diagnostic-only, no advance)
                 life_result = self.lifecycle.evaluate(
                     setup,
                     instance,
@@ -269,18 +273,17 @@ class ConditionEngine:
                     data_ok=data_ok,
                     data_diagnostics=data_diagnostics,
                 )
-                # Always retain returned instance (terminal or progress)
                 self._instances[setup.setup_id] = life_result.instance
+                setup_outcomes[setup.setup_id] = {
+                    "previous_state": life_result.previous_state,
+                    "transitioned": life_result.transitioned,
+                    "diagnostic_only": life_result.diagnostic_only,
+                    "reasons": life_result.reasons,
+                }
 
                 if life_result.diagnostic_only:
-                    logger.debug(
-                        "Setup %s diagnostic-only reasons=%s",
-                        setup.setup_id,
-                        life_result.reasons,
-                    )
                     continue
 
-                # Emit only on transition into COMPLETED
                 if (
                     life_result.transitioned
                     and life_result.instance.state == LifecycleState.COMPLETED
@@ -288,17 +291,11 @@ class ConditionEngine:
                 ):
                     dedup_key = (life_result.instance.instance_id, latest.epoch)
                     if dedup_key in self._emitted:
-                        logger.debug(
-                            "Skip duplicate setup signal instance=%s epoch=%s",
-                            life_result.instance.instance_id,
-                            latest.epoch,
-                        )
                         continue
                     sig = self._signal_from_lifecycle(
                         setup, life_result, eval_obs, candle_epoch=latest.epoch
                     )
                     self._emitted.add(dedup_key)
-                    # Also record under setup_id for callers inspecting legacy-style keys
                     self._emitted.add((setup.setup_id, latest.epoch))
                     signals.append(sig)
                     logger.info(
@@ -312,6 +309,15 @@ class ConditionEngine:
                     )
 
         self._last_observations = cycle_new
+        self._record_cycle_snapshot(
+            evaluation_blocked=False,
+            block_reason=None,
+            series_views=series_views,
+            setup_outcomes=setup_outcomes,
+            detector_emitted_ids=[o.id for o in cycle_new],
+            newly_accepted_ids=newly_accepted_ids,
+            signals=signals,
+        )
         return signals
 
     def _signal_from_lifecycle(
@@ -322,12 +328,10 @@ class ConditionEngine:
         *,
         candle_epoch: int,
     ) -> Signal:
-        """Build an explainable Signal from a COMPLETED lifecycle transition."""
         expr = life_result.expression_result
         supporting_ids: list[str] = []
         if expr is not None and expr.evidence:
             supporting_ids = [e.observation_id for e in expr.evidence]
-        # Prefer committed THEN evidence when present on progress
         progress = life_result.instance.progress
         if progress is not None and getattr(progress, "committed_steps", None):
             for step in progress.committed_steps:
@@ -372,14 +376,12 @@ class ConditionEngine:
         if timeframe in self._tf_seconds:
             return self._tf_seconds[timeframe]
         market = self.market
-        # Prefer MarketDataService granularity map when available
         gran_map = getattr(market, "_gran_by_name", None)
         if isinstance(gran_map, dict) and timeframe in gran_map:
             try:
                 return int(gran_map[timeframe])
             except (TypeError, ValueError):
                 pass
-        # Optional helper on market for tests
         getter = getattr(market, "timeframe_seconds", None)
         if callable(getter):
             try:
@@ -393,12 +395,6 @@ class ConditionEngine:
     def _series_data_health(
         self, symbol: str, timeframe: str
     ) -> tuple[bool, tuple[str, ...]]:
-        """Return (data_ok, diagnostics) for lifecycle evaluation.
-
-        Fail-closed: when series health cannot be verified (missing interface,
-        lookup failure, or check exception), return data_ok=False so lifecycle
-        state does not advance. Explicit unhealthy / quarantine also blocks.
-        """
         market = self.market
         saw_health_interface = False
 
@@ -456,11 +452,8 @@ class ConditionEngine:
                         f"quarantined epochs present: {sorted(epochs)[:5]}",
                     )
 
-            # Cache path with a successful is_series_healthy check is sufficient.
             if callable(is_healthy):
                 return True, ()
-            # Cache present but no health method — try series_ok below; if that
-            # is also absent, fall through to the unverifiable failure.
 
         series_ok = getattr(market, "series_ok", None)
         if callable(series_ok):
@@ -486,12 +479,50 @@ class ConditionEngine:
             "cannot verify data health",
         )
 
+    def _record_blocked_cycle(self) -> None:
+        self._record_cycle_snapshot(
+            evaluation_blocked=True,
+            block_reason=self.readiness.reason,
+            series_views=[],
+            setup_outcomes={},
+            detector_emitted_ids=[],
+            newly_accepted_ids=[],
+            signals=[],
+        )
+        self._last_observations = []
+
+    def _record_cycle_snapshot(
+        self,
+        *,
+        evaluation_blocked: bool,
+        block_reason: Optional[str],
+        series_views: list[SeriesCycleView],
+        setup_outcomes: dict[str, dict],
+        detector_emitted_ids: list[str],
+        newly_accepted_ids: list[str],
+        signals: list[Signal],
+    ) -> None:
+        setup_views = build_setup_views(
+            self.setups, self._instances, cycle_outcomes=setup_outcomes
+        )
+        self._monitoring = MonitoringSnapshot(
+            cycle_recorded=True,
+            evaluation_blocked=evaluation_blocked,
+            block_reason=block_reason,
+            readiness_state=self.readiness.state.value,
+            readiness_reason=self.readiness.reason,
+            series=tuple(series_views),
+            setups=setup_views,
+            detector_emitted_observation_ids=tuple(detector_emitted_ids),
+            newly_accepted_observation_ids=tuple(newly_accepted_ids),
+            signal_ids=tuple(s.id for s in signals),
+            signal_count=len(signals),
+        )
+
     @property
     def last_observations(self) -> list[Observation]:
-        """Observations newly emitted by detectors in the last evaluate_once."""
         return list(self._last_observations)
 
     @property
     def retained_observations(self) -> list[Observation]:
-        """All observations currently held in the store."""
         return self.store.all()
