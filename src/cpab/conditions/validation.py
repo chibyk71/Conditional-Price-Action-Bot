@@ -54,26 +54,64 @@ def _require_non_empty_str(value: Any, path: str, setup_id: Optional[str] = None
     return value.strip()
 
 
-def _validate_reserved_block(
+def _parse_invalidation(
     raw: Any,
-    field_name: str,
     path: str,
     setup_id: Optional[str],
-) -> Optional[dict[str, Any]]:
-    """Reserved invalidation/expiry: null/absent ok; if present must be a mapping.
-
-    Behavior is not implemented in 7A. Reject non-mappings and require that
-    any present block is a plain dict (future schema_version may appear inside).
-    """
+) -> Optional[Expression]:
+    """Parse optional invalidation expression (leaf / AND / OR only; no THEN)."""
     if raw is None:
         return None
     if not isinstance(raw, dict):
         raise SetupValidationError(
-            f"reserved field {field_name!r} must be a mapping or null, got {type(raw).__name__}",
+            f"invalidation must be a mapping or null, got {type(raw).__name__}",
             path=path,
             setup_id=setup_id,
         )
-    return dict(raw)
+    # Reject THEN: invalidation is a single-shot condition, not a sequence.
+    expr = parse_expression(
+        raw, path=path, setup_id=setup_id, allow_then=False
+    )
+    return expr
+
+
+def _parse_expiry(
+    raw: Any,
+    path: str,
+    setup_id: Optional[str],
+) -> Optional["ExpiryConfig"]:
+    """Parse optional expiry: {{max_age_candles: positive int}} only."""
+    from cpab.conditions.schema import ExpiryConfig
+
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise SetupValidationError(
+            f"expiry must be a mapping or null, got {type(raw).__name__}",
+            path=path,
+            setup_id=setup_id,
+        )
+    unknown = set(raw.keys()) - {"max_age_candles"}
+    if unknown:
+        raise SetupValidationError(
+            f"unknown field(s) on expiry: {sorted(unknown)}; only max_age_candles is permitted",
+            path=path,
+            setup_id=setup_id,
+        )
+    if "max_age_candles" not in raw:
+        raise SetupValidationError(
+            "expiry requires max_age_candles",
+            path=f"{path}.max_age_candles",
+            setup_id=setup_id,
+        )
+    n = raw["max_age_candles"]
+    if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+        raise SetupValidationError(
+            f"max_age_candles must be a positive integer, got {n!r}",
+            path=f"{path}.max_age_candles",
+            setup_id=setup_id,
+        )
+    return ExpiryConfig(max_age_candles=n)
 
 
 def parse_expression(
@@ -357,11 +395,11 @@ def parse_setup(raw: Any, *, index: Optional[int] = None) -> SetupDef:
                 path=f"{path_prefix}.description",
                 setup_id=setup_id,
             )
-    invalidation = _validate_reserved_block(
-        data.get("invalidation"), "invalidation", f"{path_prefix}.invalidation", setup_id
+    invalidation = _parse_invalidation(
+        data.get("invalidation"), f"{path_prefix}.invalidation", setup_id
     )
-    expiry = _validate_reserved_block(
-        data.get("expiry"), "expiry", f"{path_prefix}.expiry", setup_id
+    expiry = _parse_expiry(
+        data.get("expiry"), f"{path_prefix}.expiry", setup_id
     )
     expression = parse_expression(
         data["expression"], path=f"{path_prefix}.expression", setup_id=setup_id

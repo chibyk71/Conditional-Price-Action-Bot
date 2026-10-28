@@ -1,12 +1,12 @@
 """Version-1 setup schema (declarative configuration only).
 
-Phase 7A defines and validates setup configuration. It does not evaluate
-expressions, manage instances, or generate signals.
+Phase 7A defines and validates setup configuration. Phase 7C adds validated
+invalidation expression and explicit candle-based expiry configuration.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from cpab.conditions.expression import Expression
@@ -23,11 +23,25 @@ V1_ALLOWED_FIELDS = V1_REQUIRED_FIELDS | V1_OPTIONAL_FIELDS
 
 
 @dataclass(frozen=True)
+class ExpiryConfig:
+    """Explicit candle-based expiry (Phase 7C).
+
+    Anchored to the instance's first accepted evaluation candle.
+    Expires inclusively when elapsed valid candles >= max_age_candles.
+    """
+
+    max_age_candles: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"max_age_candles": self.max_age_candles}
+
+
+@dataclass(frozen=True)
 class SetupDef:
     """Validated version-1 setup definition.
 
-    Reserved fields (invalidation, expiry) are stored when present and
-    structurally validated, but have no runtime behavior in Phase 7A.
+    invalidation: optional ObservationRequirement / AND / OR expression (no THEN).
+    expiry: optional explicit max_age_candles configuration.
     """
 
     schema_version: int
@@ -38,8 +52,8 @@ class SetupDef:
     expression: Expression
     name: Optional[str] = None
     description: Optional[str] = None
-    invalidation: Optional[dict[str, Any]] = None
-    expiry: Optional[dict[str, Any]] = None
+    invalidation: Optional[Expression] = None
+    expiry: Optional[ExpiryConfig] = None
 
     def to_behavior_dict(self) -> dict[str, Any]:
         """Behavior-affecting fields only (excludes presentation-only name/description)."""
@@ -52,7 +66,7 @@ class SetupDef:
             "expression": self.expression.to_dict(),
         }
         if self.invalidation is not None:
-            d["invalidation"] = self.invalidation
+            d["invalidation"] = self.invalidation.to_dict()
         if self.expiry is not None:
-            d["expiry"] = self.expiry
+            d["expiry"] = self.expiry.to_dict()
         return d
