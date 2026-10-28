@@ -181,6 +181,10 @@ class _FakeMarket:
             if c.is_closed and c.symbol == symbol and c.timeframe == timeframe
         ]
 
+    def series_ok(self, symbol, timeframe) -> bool:
+        """Default healthy so engine series-health gate allows evaluation."""
+        return True
+
 
 def test_readiness_blocks_talib_adapter_via_engine():
     series = _known_positive_engulfing()

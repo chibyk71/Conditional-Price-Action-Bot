@@ -486,6 +486,69 @@ def test_unhealthy_series_does_not_advance():
     assert inst.last_evaluation_candle == ep0
 
 
+def test_unhealthy_cycle_observations_not_retained_for_later_setup():
+    """Observations produced while series is unhealthy must not enter the store
+    and must not later complete a setup after health recovers.
+    """
+    ep0 = START
+    ep1 = START + 60
+    ep2 = START + 120
+    setup = _setup(ObservationRequirement(type="a"), setup_id="stale_obs")
+    market = FakeMarket(_candles_up_to(ep0), series_healthy=False)
+    # Detector would emit "a" on the unhealthy bar if detectors were allowed to run
+    det = ScriptedDetector(
+        {
+            ep0: [_obs("a", ep0)],
+            ep1: [_obs("a", ep1)],
+            ep2: [],  # no new evidence on recovery bar
+        }
+    )
+    engine = _engine(market, setups=[setup], detectors=[det])
+
+    # Unhealthy: no detect, no store, no completion
+    assert engine.evaluate_once() == []
+    assert engine.get_instance("stale_obs").state == LifecycleState.PENDING
+    assert all(o.type != "a" for o in engine.store.query(SYMBOL, TF))
+
+    # Still unhealthy on next bar with scripted "a" — still must not retain
+    market.set_candles(_candles_up_to(ep1))
+    assert engine.evaluate_once() == []
+    assert all(o.type != "a" for o in engine.store.query(SYMBOL, TF))
+    assert engine.get_instance("stale_obs").state == LifecycleState.PENDING
+
+    # Health recovers but detector has no new emission for ep2; prior unhealthy
+    # observations must not be available to complete the setup.
+    market.set_candles(_candles_up_to(ep2))
+    market.set_healthy(True)
+    sigs = engine.evaluate_once()
+    assert sigs == []
+    assert engine.get_instance("stale_obs").state != LifecycleState.COMPLETED
+    assert all(o.type != "a" for o in engine.store.query(SYMBOL, TF))
+
+
+def test_legacy_condition_no_signal_when_series_unhealthy():
+    """Legacy conditions must not emit when series health fails the gate."""
+    ep = START + 60
+    market = FakeMarket(_candles_up_to(ep), series_healthy=False)
+    det = ScriptedDetector({ep: [_obs("bullish_engulfing", ep)]})
+    cond = ConditionDef(
+        id="legacy_unhealthy",
+        symbol=SYMBOL,
+        timeframe=TF,
+        require_observations=[{"type": "bullish_engulfing", "min_count": 1}],
+    )
+    engine = _engine(market, conditions=[cond], detectors=[det])
+    assert engine.evaluate_once() == []
+    # Observation from the unhealthy cycle must not be retained
+    assert all(o.type != "bullish_engulfing" for o in engine.store.query(SYMBOL, TF))
+
+    # Recovery without a new detector emission still yields no legacy signal
+    market.set_candles(_candles_up_to(ep + 60))
+    market.set_healthy(True)
+    # Scripted detector already consumed ep; no emission on ep+60
+    assert engine.evaluate_once() == []
+
+
 class _RaisingCacheMarket:
     """Market double that can raise from get_cache / is_series_healthy / series_ok."""
 
