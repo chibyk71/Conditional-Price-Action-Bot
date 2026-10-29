@@ -201,31 +201,35 @@ def test_phase8a_invalidation_precedence_over_completion():
 
 
 def test_phase8a_expiry_e2e():
-    """max_age_candles=1: first THEN step, no second step, next candle → EXPIRED."""
+    """max_age_candles=1 continuous lifecycle: BOS at ep0 → IN_PROGRESS; ep1 no step2 → EXPIRED.
+
+    Expiry anchors to the first accepted evaluation candle (not the THEN-qualify
+    candle alone). Exercise a continuous run: evaluate at ep0 with the first
+    THEN step observation, then the next contiguous candle without step 2.
+    """
     setup = _setup_from_fixture("phase8a_expiry")
     assert setup.expiry is not None
     assert setup.expiry.max_age_candles == 1
 
     ep0 = START
-    ep1 = START + TF_SEC  # first THEN step qualifies; becomes anchor
-    ep2 = START + 2 * TF_SEC  # next contiguous completed candle; elapsed=1 >= 1
+    ep1 = START + TF_SEC  # next contiguous completed candle; elapsed=1 >= 1
 
     det = ScriptedDetector(
         {
-            ep1: [_obs("structure_break", ep1, variant="bos")],
-            # deliberately no zone_interaction/rejection on any candle
+            # First accepted evaluation AND first THEN step on the same candle
+            ep0: [_obs("structure_break", ep0, variant="bos")],
+            # deliberately no zone_interaction/rejection on any later candle
         }
     )
     market = FakeMarket(_candles_up_to(ep0))
     engine = _engine(market, setups=[setup], detectors=[det])
 
-    # Start THEN sequence (step 1 only)
-    market.set_candles(_candles_up_to(ep1))
+    # Continuous lifecycle: evaluate at ep0 with BOS → IN_PROGRESS (anchor=ep0)
     assert engine.evaluate_once() == []
     assert engine.get_instance("phase8a_expiry").state == LifecycleState.IN_PROGRESS
 
-    # Second step never arrives; contiguous next candle expires under max_age_candles=1
-    market.set_candles(_candles_up_to(ep2))
+    # Second step never arrives; next contiguous candle expires under max_age_candles=1
+    market.set_candles(_candles_up_to(ep1))
     sigs = engine.evaluate_once()
     assert sigs == []
     assert engine.get_instance("phase8a_expiry").state == LifecycleState.EXPIRED
@@ -236,7 +240,7 @@ def test_phase8a_expiry_e2e():
     assert snap.setups[0].transitioned is True
 
     # Terminal immutability
-    market.set_candles(_candles_up_to(ep2 + TF_SEC))
+    market.set_candles(_candles_up_to(ep1 + TF_SEC))
     assert engine.evaluate_once() == []
     assert engine.get_instance("phase8a_expiry").state == LifecycleState.EXPIRED
 
