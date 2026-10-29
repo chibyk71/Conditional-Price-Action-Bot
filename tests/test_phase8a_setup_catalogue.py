@@ -128,7 +128,7 @@ def test_fixtures_load_via_setups_from_config():
     assert by_id["phase8a_completion"].expiry is None
     assert by_id["phase8a_invalidation"].invalidation is not None
     assert by_id["phase8a_expiry"].expiry is not None
-    assert by_id["phase8a_expiry"].expiry.max_age_candles == 2
+    assert by_id["phase8a_expiry"].expiry.max_age_candles == 1
 
 
 def test_fixture_identifiers_and_terminal_intent_unchanged():
@@ -139,7 +139,7 @@ def test_fixture_identifiers_and_terminal_intent_unchanged():
     assert inv.invalidation.variant == "choch"
     exp = _setup_from_fixture("phase8a_expiry")
     assert exp.expiry is not None
-    assert exp.expiry.max_age_candles == 2
+    assert exp.expiry.max_age_candles == 1
 
 
 def test_phase8a_completion_e2e():
@@ -201,28 +201,42 @@ def test_phase8a_invalidation_precedence_over_completion():
 
 
 def test_phase8a_expiry_e2e():
+    """max_age_candles=1: first THEN step, no second step, next candle → EXPIRED."""
     setup = _setup_from_fixture("phase8a_expiry")
     assert setup.expiry is not None
-    max_age = setup.expiry.max_age_candles
-    ep0, ep1 = START, START + TF_SEC
-    epochs = [ep1 + i * TF_SEC for i in range(0, max_age + 2)]
-    det = ScriptedDetector({ep1: [_obs("structure_break", ep1, variant="bos")]})
+    assert setup.expiry.max_age_candles == 1
+
+    ep0 = START
+    ep1 = START + TF_SEC  # first THEN step qualifies; becomes anchor
+    ep2 = START + 2 * TF_SEC  # next contiguous completed candle; elapsed=1 >= 1
+
+    det = ScriptedDetector(
+        {
+            ep1: [_obs("structure_break", ep1, variant="bos")],
+            # deliberately no zone_interaction/rejection on any candle
+        }
+    )
     market = FakeMarket(_candles_up_to(ep0))
     engine = _engine(market, setups=[setup], detectors=[det])
+
+    # Start THEN sequence (step 1 only)
     market.set_candles(_candles_up_to(ep1))
     assert engine.evaluate_once() == []
     assert engine.get_instance("phase8a_expiry").state == LifecycleState.IN_PROGRESS
-    final_state = LifecycleState.IN_PROGRESS
-    for ep in epochs[1:]:
-        market.set_candles(_candles_up_to(ep))
-        assert engine.evaluate_once() == []
-        final_state = engine.get_instance("phase8a_expiry").state
-        if final_state == LifecycleState.EXPIRED:
-            break
-    assert final_state == LifecycleState.EXPIRED
+
+    # Second step never arrives; contiguous next candle expires under max_age_candles=1
+    market.set_candles(_candles_up_to(ep2))
+    sigs = engine.evaluate_once()
+    assert sigs == []
+    assert engine.get_instance("phase8a_expiry").state == LifecycleState.EXPIRED
+
     snap = engine.last_monitoring_snapshot
-    assert snap.signal_count == 0 and snap.setups[0].state == LifecycleState.EXPIRED.value and snap.setups[0].transitioned is True
-    market.set_candles(_candles_up_to(epochs[-1] + TF_SEC))
+    assert snap.signal_count == 0
+    assert snap.setups[0].state == LifecycleState.EXPIRED.value
+    assert snap.setups[0].transitioned is True
+
+    # Terminal immutability
+    market.set_candles(_candles_up_to(ep2 + TF_SEC))
     assert engine.evaluate_once() == []
     assert engine.get_instance("phase8a_expiry").state == LifecycleState.EXPIRED
 
