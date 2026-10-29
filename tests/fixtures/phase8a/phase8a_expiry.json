@@ -22,6 +22,6 @@
     ]
   },
   "expiry": {
-    "max_age_candles": 2
+    "max_age_candles": 1
   }
 }
