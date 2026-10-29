@@ -32,6 +32,21 @@ Implementation reference: `ExpressionEvaluator` leaf matching in
   observation payloads) are **descriptive information only**. They are not
   additional schema fields on `SetupDef` / `ObservationRequirement`.
 
+## Detector configuration vs emitted identifiers
+
+Some detectors accept **constructor / registry configuration** values that are
+not themselves written onto emitted observations:
+
+- **Pullback** constructor `variant`: `structure_based` | `impulse_based` | `all`.
+  Observations always use `type=pullback` with emitted `variant` of
+  `structure_based` or `impulse_based` only. Config `all` selects both
+  reconstructors; it is never the observation variant string.
+- Lifecycle / payload fields (e.g. pullback termination reasons) are not
+  observation variants and must not appear as `variant` in setup JSON.
+
+Setup requirements must reference **emitted** `type` / optional `variant`
+pairs from the tables below, not detector config knobs or registry aliases.
+
 ## Catalogue coverage disclaimer
 
 Catalogue coverage means: the type/variant pair is constructed at a known
@@ -120,7 +135,7 @@ themselves emitted (they are not for the default engulfing path).
 | `range_expansion` | `true_range_v1` | |
 | `bullish_impulse` | `atr_normalized_candle_v1` | |
 | `bearish_impulse` | `atr_normalized_candle_v1` | |
-| `pullback` | `structure_based`, `impulse_based`, `all` | Termination reasons in payload are **not** variants |
+| `pullback` | `structure_based`, `impulse_based` | Emitted logical variants only. Detector constructor also accepts config value `all` (run both reconstructors); that config is **not** an observation `variant`. Termination reasons in payload (`trend_resumption`, `structural_failure`, `invalidation`) are **not** variants |
 | `breakout_behavior` | `breakout_confirmed`, `breakout_failed`, `breakout_follow_through` | `variant` equals event type; follow-through is opt-in on the detector |
 
 ## Canonical fixtures
