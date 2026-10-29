@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "setup_id": "phase8a_invalidation",
+  "symbol": "R_100",
+  "timeframe": "1m",
+  "enabled": true,
+  "name": "Phase 8A invalidation fixture",
+  "description": "THEN sequence starts with structure_break/bos; invalidation is structure_break/choch. Descriptive fields only.",
+  "expression": {
+    "op": "then",
+    "steps": [
+      {
+        "type": "structure_break",
+        "variant": "bos",
+        "min_count": 1
+      },
+      {
+        "type": "zone_interaction",
+        "variant": "rejection",
+        "min_count": 1
+      }
+    ]
+  },
+  "invalidation": {
+    "type": "structure_break",
+    "variant": "choch",
+    "min_count": 1
+  }
+}

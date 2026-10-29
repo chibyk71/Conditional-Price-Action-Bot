@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "setup_id": "phase8a_completion",
+  "symbol": "R_100",
+  "timeframe": "1m",
+  "enabled": true,
+  "name": "Phase 8A completion fixture",
+  "description": "THEN structure_break/bos then zone_interaction/rejection. Prices/stops/targets are descriptive only.",
+  "expression": {
+    "op": "then",
+    "steps": [
+      {
+        "type": "structure_break",
+        "variant": "bos",
+        "min_count": 1
+      },
+      {
+        "type": "zone_interaction",
+        "variant": "rejection",
+        "min_count": 1
+      }
+    ]
+  }
+}
