@@ -235,3 +235,54 @@ def test_live_style_htf_from_1m_aggregation():
     htf_epochs = last.monitoring.get("htf_epochs") or ()
     # At least one complete 15m bucket from 30 ones
     assert len(htf_epochs) >= 1
+
+
+def test_live_style_htf_initialization_explicit_series():
+    """Initialization-style path: independent HTF history feed (not aggregate)."""
+    primary = _candles(20)
+    # Explicit 15m HTF series (simulates history fetched at init)
+    htf = [
+        make_candle(SYMBOL, "15m", START + i * 900, 100.0, 101.0, 99.0, 100.5, is_closed=True)
+        for i in range(5)
+    ]
+    live = run_live_style(
+        LiveStyleConfig(
+            setups=[],
+            detectors=[EngulfingDetector()],
+            symbol=SYMBOL,
+            timeframe=TF,
+            timeframe_seconds=TF_SEC,
+            candles=primary,
+            arm_count=5,
+            htf=(SYMBOL, "15m", 900, htf),
+        )
+    )
+    assert live.cycles
+    mon = live.cycles[-1].monitoring
+    assert mon is not None
+    assert mon.get("htf_source") == "explicit_series"
+    assert len(mon.get("htf_epochs") or ()) >= 1
+
+
+def test_live_style_identical_knobs_match():
+    """Two live-style runs with identical knobs must fully match (no INPUT_DIVERGENCE)."""
+    candles = _candles(12)
+    def _run():
+        return run_live_style(
+            LiveStyleConfig(
+                setups=[],
+                detectors=[EngulfingDetector()],
+                symbol=SYMBOL,
+                timeframe=TF,
+                timeframe_seconds=TF_SEC,
+                candles=candles,
+                arm_count=5,
+                cache_max_size=100,
+                confirm_lag_bars=1,
+            )
+        )
+    a, b = _run(), _run()
+    cmp = compare_replay_runs(a, b)
+    assert cmp.matching, cmp.to_dict()
+    assert not cmp.input_divergence
+    assert not cmp.engine_divergence

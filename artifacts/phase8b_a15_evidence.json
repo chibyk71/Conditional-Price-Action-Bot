@@ -1,0 +1,160 @@
+{
+  "a6": {
+    "F1-completion-real": {
+      "extra": {
+        "impulse_idx": 98,
+        "transition_cycle": 98
+      },
+      "status": "real_env_passed"
+    },
+    "F1-expiry-real": {
+      "status": "real_env_passed"
+    },
+    "F1-invalidation-real": {
+      "status": "real_env_passed"
+    },
+    "F2-completion-real": {
+      "extra": {
+        "confirm_idx": 76,
+        "event_idx": 75,
+        "transition_cycle": 79
+      },
+      "status": "real_env_passed"
+    },
+    "F2-invalidation-real": {
+      "extra": {
+        "confirm_idx": 93,
+        "event_idx": 92,
+        "transition_cycle": 93
+      },
+      "status": "real_env_passed"
+    },
+    "F3-completion-real": {
+      "status": "real_env_passed"
+    },
+    "F3-invalidation-real": {
+      "status": "real_env_passed"
+    },
+    "phase8a-completion": {
+      "status": "real_env_passed"
+    },
+    "phase8a-expiry": {
+      "status": "real_env_passed"
+    },
+    "phase8a-invalidation": {
+      "status": "real_env_passed"
+    }
+  },
+  "a6_memory": {
+    "F1-completion-real": "real_env_passed",
+    "F1-expiry-real": "real_env_passed",
+    "F1-invalidation-real": "real_env_passed",
+    "F2-completion-real": "real_env_passed",
+    "F2-invalidation-real": "real_env_passed",
+    "F3-completion-real": "real_env_passed",
+    "F3-invalidation-real": "real_env_passed",
+    "phase8a-completion": "real_env_passed",
+    "phase8a-expiry": "real_env_passed",
+    "phase8a-invalidation": "real_env_passed"
+  },
+  "stall": {
+    "('F1-completion', 'IN_PROGRESS', 'missing_candle', 1)": {
+      "status": "real_env_passed"
+    },
+    "('F1-completion', 'IN_PROGRESS', 'missing_candle', 5)": {
+      "status": "real_env_passed"
+    },
+    "('F1-completion', 'IN_PROGRESS', 'readiness_blocked', 1)": {
+      "status": "real_env_passed"
+    },
+    "('F1-completion', 'IN_PROGRESS', 'readiness_blocked', 5)": {
+      "status": "real_env_passed"
+    },
+    "('F1-completion', 'IN_PROGRESS', 'unhealthy', 1)": {
+      "status": "real_env_passed"
+    },
+    "('F1-completion', 'IN_PROGRESS', 'unhealthy', 5)": {
+      "status": "real_env_passed"
+    },
+    "('F1-completion', 'PENDING', 'missing_candle', 1)": {
+      "status": "real_env_passed"
+    },
+    "('F1-completion', 'PENDING', 'missing_candle', 5)": {
+      "status": "real_env_passed"
+    },
+    "('F1-completion', 'PENDING', 'readiness_blocked', 1)": {
+      "status": "real_env_passed"
+    },
+    "('F1-completion', 'PENDING', 'readiness_blocked', 5)": {
+      "status": "real_env_passed"
+    },
+    "('F1-completion', 'PENDING', 'unhealthy', 1)": {
+      "status": "real_env_passed"
+    },
+    "('F1-completion', 'PENDING', 'unhealthy', 5)": {
+      "status": "real_env_passed"
+    },
+    "('F1-expiry', 'PENDING', 'missing_candle', 1)": {
+      "status": "real_env_passed"
+    },
+    "('F1-expiry', 'PENDING', 'missing_candle', 5)": {
+      "status": "real_env_passed"
+    },
+    "('F1-expiry', 'PENDING', 'readiness_blocked', 1)": {
+      "status": "real_env_passed"
+    },
+    "('F1-expiry', 'PENDING', 'readiness_blocked', 5)": {
+      "status": "real_env_passed"
+    },
+    "('F1-expiry', 'PENDING', 'unhealthy', 1)": {
+      "status": "real_env_passed"
+    },
+    "('F1-expiry', 'PENDING', 'unhealthy', 5)": {
+      "status": "real_env_passed"
+    },
+    "('F1-invalidation', 'PENDING', 'missing_candle', 1)": {
+      "status": "real_env_passed"
+    },
+    "('F1-invalidation', 'PENDING', 'missing_candle', 5)": {
+      "status": "real_env_passed"
+    },
+    "('F1-invalidation', 'PENDING', 'readiness_blocked', 1)": {
+      "status": "real_env_passed"
+    },
+    "('F1-invalidation', 'PENDING', 'readiness_blocked', 5)": {
+      "status": "real_env_passed"
+    },
+    "('F1-invalidation', 'PENDING', 'unhealthy', 1)": {
+      "status": "real_env_passed"
+    },
+    "('F1-invalidation', 'PENDING', 'unhealthy', 5)": {
+      "status": "real_env_passed"
+    }
+  },
+  "stall_memory": {
+    "('F1-completion', 'IN_PROGRESS', 'missing_candle', 1)": "real_env_passed",
+    "('F1-completion', 'IN_PROGRESS', 'missing_candle', 5)": "real_env_passed",
+    "('F1-completion', 'IN_PROGRESS', 'readiness_blocked', 1)": "real_env_passed",
+    "('F1-completion', 'IN_PROGRESS', 'readiness_blocked', 5)": "real_env_passed",
+    "('F1-completion', 'IN_PROGRESS', 'unhealthy', 1)": "real_env_passed",
+    "('F1-completion', 'IN_PROGRESS', 'unhealthy', 5)": "real_env_passed",
+    "('F1-completion', 'PENDING', 'missing_candle', 1)": "real_env_passed",
+    "('F1-completion', 'PENDING', 'missing_candle', 5)": "real_env_passed",
+    "('F1-completion', 'PENDING', 'readiness_blocked', 1)": "real_env_passed",
+    "('F1-completion', 'PENDING', 'readiness_blocked', 5)": "real_env_passed",
+    "('F1-completion', 'PENDING', 'unhealthy', 1)": "real_env_passed",
+    "('F1-completion', 'PENDING', 'unhealthy', 5)": "real_env_passed",
+    "('F1-expiry', 'PENDING', 'missing_candle', 1)": "real_env_passed",
+    "('F1-expiry', 'PENDING', 'missing_candle', 5)": "real_env_passed",
+    "('F1-expiry', 'PENDING', 'readiness_blocked', 1)": "real_env_passed",
+    "('F1-expiry', 'PENDING', 'readiness_blocked', 5)": "real_env_passed",
+    "('F1-expiry', 'PENDING', 'unhealthy', 1)": "real_env_passed",
+    "('F1-expiry', 'PENDING', 'unhealthy', 5)": "real_env_passed",
+    "('F1-invalidation', 'PENDING', 'missing_candle', 1)": "real_env_passed",
+    "('F1-invalidation', 'PENDING', 'missing_candle', 5)": "real_env_passed",
+    "('F1-invalidation', 'PENDING', 'readiness_blocked', 1)": "real_env_passed",
+    "('F1-invalidation', 'PENDING', 'readiness_blocked', 5)": "real_env_passed",
+    "('F1-invalidation', 'PENDING', 'unhealthy', 1)": "real_env_passed",
+    "('F1-invalidation', 'PENDING', 'unhealthy', 5)": "real_env_passed"
+  }
+}

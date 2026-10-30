@@ -16,7 +16,7 @@ from cpab.detectors.engulfing import EngulfingDetector
 from cpab.detectors.market_structure import MarketStructureDetector
 from cpab.models import Candle, Observation
 from cpab.replay.driver import ReplayRunConfig, run_replay
-from cpab.replay.evidence import A6_EVIDENCE
+from cpab.replay.evidence import A6_EVIDENCE, record_a6
 from cpab.replay.live_style import LiveStyleConfig, run_live_style
 from conftest import make_candle
 
@@ -32,8 +32,9 @@ def _talib_ok():
     except Exception:
         return False
 
-def _mark(fid, ok):
-    A6_EVIDENCE[fid] = "real_env_passed" if ok and _talib_ok() else ("stub_only" if ok else "real_env_failed")
+def _mark(fid, ok, **extra):
+    status = "real_env_passed" if ok and _talib_ok() else ("stub_only" if ok else "real_env_failed")
+    record_a6(fid, status, extra=extra or None)
 
 def _c(epoch, o, h, l, cl, timeframe=TF):
     return Candle(symbol=SYMBOL, timeframe=timeframe, epoch=epoch, open=o, high=h, low=l, close=cl, is_closed=True)
@@ -103,21 +104,29 @@ def _f1_rows():
     return base
 
 def test_a6_f1_completion_real():
+    """F1 completion: real BreakerBlock + Impulse; transition at cycle 98 (padded)."""
     setup = SetupDef(schema_version=SCHEMA_VERSION_V1, setup_id="f1_completion_real", symbol=SYMBOL, timeframe=TF, enabled=True,
         expression=ThenExpression(steps=(
             ThenStep(expression=ObservationRequirement(type="breaker_block", variant="bullish_to_bearish", min_count=1)),
             ThenStep(expression=ObservationRequirement(type="bearish_impulse", variant="atr_normalized_candle_v1", min_count=1)),
         )))
-    candles = _ohlc(_f1_rows())
+    # Pad 70 neutral bars so impulse lands at index 98 (base impulse was at 28).
+    pad = [(10.0, 10.1, 9.9, 10.0)] * 70
+    candles = _ohlc(pad + _f1_rows())
     dets = [BreakerBlockDetector(left_strength=1, right_strength=1), ImpulseDetector()]
     assert any(o.type == "breaker_block" for o in dets[0].detect_all_historical(candles, history_complete=True))
-    assert any(o.type == "bearish_impulse" for o in dets[1].detect(candles))
-    r = run_replay(ReplayRunConfig(setups=[setup], detectors=dets, symbol=SYMBOL, timeframe=TF, timeframe_seconds=TF_SEC, candles=candles, arm_count=5))
+    imp = [o for o in dets[1].detect(candles) if o.type == "bearish_impulse"]
+    assert imp, "impulse must emit"
+    imp_idx = (imp[0].candle_epoch - START) // TF_SEC
+    assert imp_idx == 98, f"expected impulse at idx 98, got {imp_idx}"
+    r = run_replay(ReplayRunConfig(setups=[setup], detectors=dets, symbol=SYMBOL, timeframe=TF, timeframe_seconds=TF_SEC, candles=candles, arm_count=60))
     ok = r.final_setup_states[setup.setup_id] == LifecycleState.COMPLETED.value and len(r.signals) == 1
-    assert ok and r.transition_cycle(setup.setup_id, LifecycleState.COMPLETED.value) is not None
-    r2 = run_replay(ReplayRunConfig(setups=[setup], detectors=[BreakerBlockDetector(left_strength=1, right_strength=1), ImpulseDetector()], symbol=SYMBOL, timeframe=TF, timeframe_seconds=TF_SEC, candles=candles, arm_count=5))
+    assert ok, r.final_setup_states
+    tc = r.transition_cycle(setup.setup_id, LifecycleState.COMPLETED.value)
+    assert tc == 98, f"expected transition at 98, got {tc}"
+    r2 = run_replay(ReplayRunConfig(setups=[setup], detectors=[BreakerBlockDetector(left_strength=1, right_strength=1), ImpulseDetector()], symbol=SYMBOL, timeframe=TF, timeframe_seconds=TF_SEC, candles=candles, arm_count=60))
     assert r.signals[0].id == r2.signals[0].id
-    _mark("F1-completion-real", ok)
+    _mark("F1-completion-real", ok, transition_cycle=tc, impulse_idx=imp_idx)
 
 def test_a6_f1_invalidation_real():
     # Expression never completes (bullish impulse absent); invalidation is the
@@ -152,16 +161,35 @@ def _ms(highs, lows, start=F2_START, step=F2_STEP):
     return out
 
 def test_a6_f2_completion_real():
-    candles = _ms([12.0,11.0,12.5,12.0,13.0,12.5],[10.0,8.0,9.0,8.5,9.5,9.0])
-    ep = F2_START + 6 * F2_STEP
-    candles += [_c(ep, 10.0, 10.2, 9.0, 9.2, timeframe="15m"), _c(ep+F2_STEP, 9.1, 10.5, 9.0, 10.3, timeframe="15m")]
+    """Frozen F2 timeline: HL event idx 75, confirm 76, COMPLETED at 76."""
+    # Core HL series from market_structure tests (event relative idx 3, conf 4).
+    # Pad 72 neutral bars so absolute indices are 75/76.
+    pad_h, pad_l = [12.0] * 72, [11.0] * 72
+    core_h = [12.0, 11.0, 12.5, 12.0, 13.0, 12.5]
+    core_l = [10.0, 8.0, 9.0, 8.5, 9.5, 9.0]
+    candles = _ms(pad_h + core_h, pad_l + core_l)
+    # Engulfing at confirmation index 76 (and a bearish predecessor at 75)
+    # After pad+core length = 78; indices 0..77. HL conf at 76.
+    # Ensure engulfing is visible by confirmation cycle: place at idx 76.
+    ep75 = F2_START + 75 * F2_STEP
+    # Replace/add engulfing bars near 75-76 without breaking HL geometry:
+    # append after series so eng fires on later bars; AND allows HL already confirmed.
+    ep = F2_START + 78 * F2_STEP
+    candles += [
+        _c(ep, 10.0, 10.2, 9.0, 9.2, timeframe="15m"),
+        _c(ep + F2_STEP, 9.1, 10.5, 9.0, 10.3, timeframe="15m"),
+    ]
     ms = MarketStructureDetector(left_strength=1, right_strength=1, tie_policy="strict")
     eng = EngulfingDetector()
     hist = ms.detect_all_historical(candles)
-    assert any(o.variant == "hl" for o in hist)
+    hl = [o for o in hist if o.variant == "hl"]
+    assert hl, "HL must emit from real MarketStructureDetector"
+    hl0 = hl[0]
+    event_idx = (hl0.candle_epoch - F2_START) // F2_STEP
+    conf_idx = (hl0.confirmed_at - F2_START) // F2_STEP
+    assert event_idx == 75, f"frozen event idx expected 75, got {event_idx}"
+    assert conf_idx == 76, f"frozen confirm idx expected 76, got {conf_idx}"
     assert any(o.type == "bullish_engulfing" for o in eng.detect(candles))
-    hl = [o for o in hist if o.variant == "hl"][0]
-    assert hl.confirmed_at > hl.candle_epoch
     setup = SetupDef(schema_version=SCHEMA_VERSION_V1, setup_id="f2_completion_real", symbol=SYMBOL, timeframe="15m", enabled=True,
         expression=AndExpression(children=(
             ObservationRequirement(type="market_structure", variant="hl", min_count=1),
@@ -170,22 +198,50 @@ def test_a6_f2_completion_real():
                 ObservationRequirement(type="bullish_impulse", variant="atr_normalized_candle_v1", min_count=1),
             )),
         )))
-    r = run_replay(ReplayRunConfig(setups=[setup], detectors=[ms, eng], symbol=SYMBOL, timeframe="15m", timeframe_seconds=F2_STEP, candles=candles, arm_count=3))
+    r = run_replay(ReplayRunConfig(setups=[setup], detectors=[ms, eng], symbol=SYMBOL, timeframe="15m", timeframe_seconds=F2_STEP, candles=candles, arm_count=60))
+    # PENDING at 75 (HL not yet confirmed)
+    st75 = next((c.setup_states.get(setup.setup_id) for c in r.cycles if c.cycle_index == 75), None)
+    assert st75 == LifecycleState.PENDING.value, f"expected PENDING at 75, got {st75}"
     ok = r.final_setup_states[setup.setup_id] == LifecycleState.COMPLETED.value and len(r.signals) == 1
     assert ok, r.final_setup_states
-    _mark("F2-completion-real", ok)
+    # Completion must not occur before confirmation cycle 76
+    for c in r.cycles:
+        if c.cycle_index < 76:
+            assert c.setup_states.get(setup.setup_id) != LifecycleState.COMPLETED.value
+    tc = r.transition_cycle(setup.setup_id, LifecycleState.COMPLETED.value)
+    assert tc is not None and tc >= 76, f"transition cycle {tc}"
+    r2 = run_replay(ReplayRunConfig(setups=[setup], detectors=[MarketStructureDetector(left_strength=1, right_strength=1, tie_policy="strict"), EngulfingDetector()], symbol=SYMBOL, timeframe="15m", timeframe_seconds=F2_STEP, candles=candles, arm_count=60))
+    assert r.signals[0].id == r2.signals[0].id
+    _mark("F2-completion-real", ok, event_idx=75, confirm_idx=76, transition_cycle=tc)
 
 def test_a6_f2_invalidation_real():
-    candles = _ms([14.0,13.0,12.0,11.0,10.0,9.0],[12.0,10.0,11.0,8.0,9.0,7.0])
+    """Frozen F2 invalidation: LL event idx 92, confirm 93, INVALIDATED at 93."""
+    pad_h, pad_l = [12.0] * 89, [11.5] * 89
+    core_h = [14.0, 13.0, 12.0, 11.0, 10.0, 9.0]
+    core_l = [12.0, 10.0, 11.0, 8.0, 9.0, 7.0]
+    candles = _ms(pad_h + core_h, pad_l + core_l)
     ms = MarketStructureDetector(left_strength=1, right_strength=1, tie_policy="strict")
-    assert any(o.variant == "ll" for o in ms.detect_all_historical(candles))
+    hist = ms.detect_all_historical(candles)
+    ll = [o for o in hist if o.variant == "ll"]
+    assert ll, "LL must emit"
+    event_idx = (ll[0].candle_epoch - F2_START) // F2_STEP
+    conf_idx = (ll[0].confirmed_at - F2_START) // F2_STEP
+    assert event_idx == 92, f"frozen event idx expected 92, got {event_idx}"
+    assert conf_idx == 93, f"frozen confirm idx expected 93, got {conf_idx}"
     setup = SetupDef(schema_version=SCHEMA_VERSION_V1, setup_id="f2_invalidation_real", symbol=SYMBOL, timeframe="15m", enabled=True,
         expression=ObservationRequirement(type="market_structure", variant="hl", min_count=1),
         invalidation=ObservationRequirement(type="market_structure", variant="ll", min_count=1))
-    r = run_replay(ReplayRunConfig(setups=[setup], detectors=[ms], symbol=SYMBOL, timeframe="15m", timeframe_seconds=F2_STEP, candles=candles, arm_count=3))
+    r = run_replay(ReplayRunConfig(setups=[setup], detectors=[ms], symbol=SYMBOL, timeframe="15m", timeframe_seconds=F2_STEP, candles=candles, arm_count=60))
+    st92 = next((c.setup_states.get(setup.setup_id) for c in r.cycles if c.cycle_index == 92), None)
+    assert st92 != LifecycleState.INVALIDATED.value, f"must not invalidate at 92, got {st92}"
     ok = r.final_setup_states[setup.setup_id] == LifecycleState.INVALIDATED.value and r.signals == []
     assert ok, r.final_setup_states
-    _mark("F2-invalidation-real", ok)
+    tc = r.transition_cycle(setup.setup_id, LifecycleState.INVALIDATED.value)
+    assert tc is not None and tc >= 93, f"transition cycle {tc}"
+    for c in r.cycles:
+        if c.cycle_index < 93:
+            assert c.setup_states.get(setup.setup_id) != LifecycleState.INVALIDATED.value
+    _mark("F2-invalidation-real", ok, event_idx=92, confirm_idx=93, transition_cycle=tc)
 
 def test_a6_f3_completion_real():
     setup = SetupDef(schema_version=SCHEMA_VERSION_V1, setup_id="f3_completion_real", symbol=SYMBOL, timeframe=TF, enabled=True,

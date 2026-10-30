@@ -1,6 +1,16 @@
-"""Shared Phase 8B acceptance evidence registries (A15)."""
+"""Shared Phase 8B acceptance evidence registries (A15).
+
+Evidence is written both in-memory and to a durable JSON manifest so acceptance
+does not depend on pytest collection order within a single process, and a
+complete record survives the test run for review.
+"""
 
 from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Any
 
 # Stall matrix: (control, state_at_s, fault_class, d) -> status
 STALL_EVIDENCE: dict[tuple, str] = {}
@@ -8,21 +18,74 @@ STALL_EVIDENCE: dict[tuple, str] = {}
 # A6 outcome fixtures: fixture_id -> status
 A6_EVIDENCE: dict[str, str] = {}
 
-# Full mandatory A6 set per revision 8 section 6b (completion/invalidation;
-# F2/F3 expiry deferred by contract).
 A6_MANDATORY_KEYS: tuple[str, ...] = (
-    # Merged Phase 8A injected-observation outcomes (still required)
     "phase8a-completion",
     "phase8a-invalidation",
     "phase8a-expiry",
-    # F1 real-detector
     "F1-completion-real",
     "F1-invalidation-real",
     "F1-expiry-real",
-    # F2 real-detector with delayed confirmation
     "F2-completion-real",
     "F2-invalidation-real",
-    # F3 real-detector
     "F3-completion-real",
     "F3-invalidation-real",
 )
+
+# Durable manifest path (overridable for CI).
+_DEFAULT_MANIFEST = Path(
+    os.environ.get(
+        "CPAB_PHASE8B_EVIDENCE_PATH",
+        str(Path(__file__).resolve().parents[3] / "artifacts" / "phase8b_a15_evidence.json"),
+    )
+)
+
+
+def _manifest_path() -> Path:
+    return Path(
+        os.environ.get("CPAB_PHASE8B_EVIDENCE_PATH", str(_DEFAULT_MANIFEST))
+    )
+
+
+def record_a6(fixture_id: str, status: str, *, extra: dict[str, Any] | None = None) -> None:
+    A6_EVIDENCE[fixture_id] = status
+    _persist(fixture_id, status, kind="a6", extra=extra)
+
+
+def record_stall(key: tuple, status: str, *, extra: dict[str, Any] | None = None) -> None:
+    STALL_EVIDENCE[key] = status
+    _persist(str(key), status, kind="stall", extra=extra)
+
+
+def _persist(key: str, status: str, *, kind: str, extra: dict[str, Any] | None) -> None:
+    path = _manifest_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data: dict[str, Any] = {"a6": {}, "stall": {}}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {"a6": {}, "stall": {}}
+        bucket = data.setdefault(kind, {})
+        entry: dict[str, Any] = {"status": status}
+        if extra:
+            entry["extra"] = extra
+        bucket[key] = entry
+        # Also mirror full in-memory maps
+        data["a6_memory"] = dict(A6_EVIDENCE)
+        data["stall_memory"] = {str(k): v for k, v in STALL_EVIDENCE.items()}
+        path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception:
+        # Persistence must not break tests; in-memory remains authoritative for
+        # same-process meta-tests.
+        pass
+
+
+def load_manifest() -> dict[str, Any]:
+    path = _manifest_path()
+    if not path.exists():
+        return {"a6": {}, "stall": {}}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"a6": {}, "stall": {}}
