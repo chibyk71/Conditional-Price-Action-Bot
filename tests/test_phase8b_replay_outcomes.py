@@ -233,8 +233,150 @@ def test_replay_records_per_cycle_fields():
     )
     assert result.cycles
     rec = result.cycles[0]
-    assert rec.cycle_index == 0
+    assert rec.cycle_index == 4  # arm_count=5 → first cycle is index 4
     assert rec.candle_epoch is not None
     assert rec.candle_ohlc is not None
     assert rec.effective_candle_epochs
     assert setup.setup_id in rec.setup_states
+
+
+# ---------------------------------------------------------------------------
+# A6 F2 delayed-confirmation timelines (frozen indices)
+# ---------------------------------------------------------------------------
+
+F2_START = 1_699_992_000  # contract: epoch = 1699992000 + 900*i
+F2_STEP = 900
+F2_ARM = 60
+
+
+def _f2_epoch(idx: int) -> int:
+    return F2_START + idx * F2_STEP
+
+
+def _f2_candles(n: int) -> list:
+    return [
+        make_candle(SYMBOL, "15m", _f2_epoch(i), 100.0, 101.0, 99.0, 100.5, is_closed=True)
+        for i in range(n)
+    ]
+
+
+def _f2_obs(typ: str, event_idx: int, *, variant: str | None = None, confirmed_idx: int | None = None) -> Observation:
+    event_ep = _f2_epoch(event_idx)
+    conf_ep = _f2_epoch(confirmed_idx) if confirmed_idx is not None else event_ep
+    return Observation(
+        id=f"{typ}_{variant or 'nv'}_{event_ep}_{conf_ep}",
+        type=typ,
+        symbol=SYMBOL,
+        timeframe="15m",
+        candle_epoch=event_ep,
+        event_time=event_ep,
+        confirmed_at=conf_ep,
+        detected_at=float(conf_ep),
+        developing=False,
+        variant=variant,
+    )
+
+
+def _f2_setup_completion():
+    from cpab.conditions.expression import AndExpression, OrExpression, ObservationRequirement
+    from cpab.conditions.schema import ExpiryConfig, SCHEMA_VERSION_V1, SetupDef
+    return SetupDef(
+        schema_version=SCHEMA_VERSION_V1,
+        setup_id="f2_bullish_higher_low_trigger",
+        symbol=SYMBOL,
+        timeframe="15m",
+        enabled=True,
+        expression=AndExpression(
+            children=(
+                ObservationRequirement(type="market_structure", variant="hl", min_count=1),
+                OrExpression(
+                    children=(
+                        ObservationRequirement(type="bullish_engulfing", min_count=1),
+                        ObservationRequirement(type="bullish_impulse", variant="atr_normalized_candle_v1", min_count=1),
+                    )
+                ),
+            )
+        ),
+        invalidation=ObservationRequirement(type="market_structure", variant="ll", min_count=1),
+        expiry=ExpiryConfig(max_age_candles=60),
+        name="F2 completion",
+    )
+
+
+def test_f2_completion_delayed_confirmation_at_76():
+    """Frozen: event at 75, confirm at 76, COMPLETED at 76; PENDING at 75."""
+    setup = _f2_setup_completion()
+    candles = _f2_candles(90)
+    # hl confirms at 76; engulfing on same candle 75 (available earlier)
+    by_epoch = {
+        _f2_epoch(64): [_f2_obs("bullish_impulse", 64, variant="atr_normalized_candle_v1")],
+        _f2_epoch(75): [_f2_obs("bullish_engulfing", 75)],
+        # market_structure/hl: event 75, confirmed_at 76 — only consumable at 76
+        _f2_epoch(76): [
+            _f2_obs("market_structure", 75, variant="hl", confirmed_idx=76),
+        ],
+    }
+    det = ScriptedDetector(by_epoch)
+    # Override detector to use 15m symbol path — ScriptedDetector ignores tf of candles
+    result = run_replay(
+        ReplayRunConfig(
+            setups=[setup],
+            detectors=[det],
+            symbol=SYMBOL,
+            timeframe="15m",
+            timeframe_seconds=F2_STEP,
+            candles=candles,
+            arm_count=F2_ARM,
+        )
+    )
+    # At cycle 75 must still be PENDING (hl not yet confirmed)
+    state_75 = None
+    state_76 = None
+    for rec in result.cycles:
+        if rec.cycle_index == 75:
+            state_75 = rec.setup_states.get(setup.setup_id)
+        if rec.cycle_index == 76:
+            state_76 = rec.setup_states.get(setup.setup_id)
+    assert state_75 == LifecycleState.PENDING.value, f"expected PENDING at 75, got {state_75}"
+    assert state_76 == LifecycleState.COMPLETED.value, f"expected COMPLETED at 76, got {state_76}"
+    assert len(result.signals) == 1
+    # Impulse at 64 must not complete alone
+    for rec in result.cycles:
+        if rec.cycle_index == 64:
+            assert rec.setup_states.get(setup.setup_id) != LifecycleState.COMPLETED.value
+
+
+def test_f2_invalidation_delayed_confirmation_at_93():
+    """Frozen: ll event 92, confirm 93, INVALIDATED at 93; not at 92."""
+    setup = _f2_setup_completion()
+    candles = _f2_candles(100)
+    by_epoch = {
+        _f2_epoch(92): [
+            _f2_obs("bullish_engulfing", 92),
+            _f2_obs("bullish_impulse", 92, variant="atr_normalized_candle_v1"),
+        ],
+        _f2_epoch(93): [
+            _f2_obs("market_structure", 92, variant="ll", confirmed_idx=93),
+        ],
+    }
+    det = ScriptedDetector(by_epoch)
+    result = run_replay(
+        ReplayRunConfig(
+            setups=[setup],
+            detectors=[det],
+            symbol=SYMBOL,
+            timeframe="15m",
+            timeframe_seconds=F2_STEP,
+            candles=candles,
+            arm_count=F2_ARM,
+        )
+    )
+    state_92 = state_93 = None
+    for rec in result.cycles:
+        if rec.cycle_index == 92:
+            state_92 = rec.setup_states.get(setup.setup_id)
+        if rec.cycle_index == 93:
+            state_93 = rec.setup_states.get(setup.setup_id)
+    assert state_92 != LifecycleState.INVALIDATED.value, f"must not invalidate at 92, got {state_92}"
+    assert state_93 == LifecycleState.INVALIDATED.value, f"expected INVALIDATED at 93, got {state_93}"
+    assert result.signals == []

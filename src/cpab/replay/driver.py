@@ -74,6 +74,7 @@ class ReplayResult:
     wired_types: tuple[str, ...]
     # Lifecycle call count per cycle (0 when readiness blocked).
     lifecycle_calls_per_cycle: list[int] = field(default_factory=list)
+    input_diagnostics: tuple[str, ...] = ()
 
     def terminal_state(self, setup_id: str) -> Optional[str]:
         return self.final_setup_states.get(setup_id)
@@ -185,13 +186,30 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
         timeframe_seconds_by_name={config.timeframe: config.timeframe_seconds},
     )
 
-    all_candles = [
-        c
-        for c in config.candles
-        if c.is_closed and c.symbol == config.symbol and c.timeframe == config.timeframe
-    ]
-    # Sort deterministically by epoch.
-    all_candles.sort(key=lambda c: c.epoch)
+    # Preserve caller order. Do not silently sort or drop forming bars — record
+    # input diagnostics when non-closed or out-of-order bars are present.
+    input_diagnostics: list[str] = []
+    all_candles: list[Candle] = []
+    prev_epoch: Optional[int] = None
+    for c in config.candles:
+        if c.symbol != config.symbol or c.timeframe != config.timeframe:
+            input_diagnostics.append(
+                f"skipped candle symbol/tf mismatch epoch={getattr(c, 'epoch', None)}"
+            )
+            continue
+        if not c.is_closed:
+            input_diagnostics.append(f"forming_candle_visible epoch={c.epoch}")
+            # Still exclude from evaluation input (contract: completed only),
+            # but the diagnostic is recorded on the result.
+            continue
+        if prev_epoch is not None and c.epoch < prev_epoch:
+            input_diagnostics.append(
+                f"out_of_order epoch={c.epoch} after {prev_epoch}"
+            )
+        if prev_epoch is not None and c.epoch == prev_epoch:
+            input_diagnostics.append(f"duplicate_epoch epoch={c.epoch}")
+        all_candles.append(c)
+        prev_epoch = c.epoch
 
     cycles: list[CycleRecord] = []
     all_signals: list[Signal] = []
@@ -201,10 +219,12 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
     )
 
     # Arm: present first arm_count candles, then evaluate once per additional candle.
+    # cycle_index = series index of the latest visible candle (contract-aligned:
+    # first evaluation uses index arm_count-1, e.g. 59 when arm_count=60).
     n = len(all_candles)
     start_eval_at = max(config.arm_count, 1)
-    # Cycle 0 evaluates with candles[0:start_eval_at] present.
-    for cycle_idx, end_idx in enumerate(range(start_eval_at, n + 1)):
+    for end_idx in range(start_eval_at, n + 1):
+        cycle_idx = end_idx - 1
         visible = list(all_candles[:end_idx])
         fault = config.fault_schedule.get(cycle_idx, {})
         injected: Optional[str] = None
@@ -358,4 +378,5 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
         required_types=tuple(sorted(required)),
         wired_types=tuple(wired),
         lifecycle_calls_per_cycle=lifecycle_calls,
+        input_diagnostics=tuple(input_diagnostics),
     )

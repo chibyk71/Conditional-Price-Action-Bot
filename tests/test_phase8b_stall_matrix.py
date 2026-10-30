@@ -1,30 +1,47 @@
-"""Phase 8B A12–A15: programmatic stall matrix and evidence tracking."""
+"""Phase 8B A12–A15: programmatic stall matrix against locked s/r/t/E values.
+
+Separate F1-completion, F1-invalidation, and F1-expiry controls. Fault windows
+use the exact contract coordinates. A15 requires a verified real-TA-Lib import.
+"""
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import pytest
 
+from cpab.conditions.expression import (
+    ObservationRequirement,
+    ThenExpression,
+    ThenStep,
+)
 from cpab.conditions.lifecycle import LifecycleState
-from cpab.conditions.validation import parse_setup
+from cpab.conditions.schema import SCHEMA_VERSION_V1, ExpiryConfig, SetupDef
 from cpab.detectors.base import PriceActionDetector
 from cpab.models import Observation
 from cpab.replay.driver import ReplayRunConfig, run_replay
-from cpab.replay.stalled import STALLED, classify_stalled
+from cpab.replay.stalled import classify_stalled
 from conftest import make_candle
 
 SYMBOL = "R_100"
 TF = "1m"
 TF_SEC = 60
 START = 1_700_000_000
-FIXTURES_8A = Path(__file__).resolve().parent / "fixtures" / "phase8a"
+ARM = 60  # first evaluation at candle index 59
 
-# Evidence status store (module-level; acceptance meta-test inspects this).
 EVIDENCE: dict[tuple, str] = {}
+
+
+def _real_talib_available() -> bool:
+    try:
+        import talib  # noqa: F401
+        from talib.abstract import Function  # noqa: F401
+
+        _ = int(Function("CDLENGULFING").lookback)
+        return True
+    except Exception:
+        return False
 
 
 class ScriptedDetector(PriceActionDetector):
@@ -63,18 +80,16 @@ def _obs(typ: str, epoch: int, *, variant: str | None = None) -> Observation:
 
 def _candles(n: int) -> list:
     return [
-        make_candle(SYMBOL, TF, START + i * TF_SEC, 100.0, 101.0, 99.0, 100.5, is_closed=True)
+        make_candle(
+            SYMBOL, TF, START + i * TF_SEC, 100.0, 101.0, 99.0, 100.5, is_closed=True
+        )
         for i in range(n)
     ]
 
 
-# ---------------------------------------------------------------------------
-# Mandatory stall-matrix definition (contract section 6) — eight F1 rows.
-# F1 here is exercised with the merged phase8a_completion control as a
-# structural stand-in so the matrix machinery is real-environment testable
-# without the seed-based F1 candle generator. Control terminal cycles are
-# measured from the clean run; s/r/t/E follow the contract formulas.
-# ---------------------------------------------------------------------------
+def _epoch(idx: int) -> int:
+    return START + idx * TF_SEC
+
 
 @dataclass(frozen=True)
 class StallRow:
@@ -87,8 +102,7 @@ class StallRow:
     E: int
 
 
-def _f1_rows() -> list[StallRow]:
-    """Exactly the eight F1 rows from the locked contract."""
+def f1_rows() -> list[StallRow]:
     return [
         StallRow("F1-completion", "PENDING", 1, 70, 71, 98, 100),
         StallRow("F1-completion", "PENDING", 5, 70, 75, 98, 100),
@@ -105,11 +119,10 @@ FAULT_CLASSES = ("unhealthy", "readiness_blocked", "missing_candle")
 
 
 def generate_stall_scenarios() -> list[dict[str, Any]]:
-    """Programmatic generation: 8 rows × 3 fault classes = 24 scenarios."""
-    scenarios = []
-    for row in _f1_rows():
+    out = []
+    for row in f1_rows():
         for fc in FAULT_CLASSES:
-            scenarios.append(
+            out.append(
                 {
                     "control": row.control,
                     "state_at_s": row.state_at_s,
@@ -122,39 +135,101 @@ def generate_stall_scenarios() -> list[dict[str, Any]]:
                     "key": (row.control, row.state_at_s, fc, row.d),
                 }
             )
-    assert len(scenarios) == 24
-    return scenarios
+    assert len(out) == 24
+    return out
 
 
-def _completion_script(candles: list) -> dict[int, list[Observation]]:
-    """Inject bos then rejection so a short series can complete."""
-    # Use late candles so arm_count can be large.
-    if len(candles) < 10:
-        return {}
-    e0 = candles[-4].epoch
-    e1 = candles[-3].epoch
-    return {
-        e0: [_obs("structure_break", e0, variant="bos")],
-        e1: [_obs("zone_interaction", e1, variant="rejection")],
-    }
-
-
-def _run_control_completion(n_candles: int = 20, arm: int = 6):
-    raw = json.loads((FIXTURES_8A / "phase8a_completion.json").read_text())
-    setup = parse_setup(raw)
-    candles = _candles(n_candles)
-    det = ScriptedDetector(_completion_script(candles))
-    return setup, run_replay(
-        ReplayRunConfig(
-            setups=[setup],
-            detectors=[det],
-            symbol=SYMBOL,
-            timeframe=TF,
-            timeframe_seconds=TF_SEC,
-            candles=candles,
-            arm_count=arm,
-        )
+def _setup_completion() -> SetupDef:
+    return SetupDef(
+        schema_version=SCHEMA_VERSION_V1,
+        setup_id="f1_completion_control",
+        symbol=SYMBOL,
+        timeframe=TF,
+        enabled=True,
+        expression=ThenExpression(
+            steps=(
+                ThenStep(
+                    expression=ObservationRequirement(
+                        type="structure_break", variant="bos", min_count=1
+                    )
+                ),
+                ThenStep(
+                    expression=ObservationRequirement(
+                        type="zone_interaction", variant="rejection", min_count=1
+                    )
+                ),
+            )
+        ),
+        name="F1 completion control",
     )
+
+
+def _setup_invalidation() -> SetupDef:
+    return SetupDef(
+        schema_version=SCHEMA_VERSION_V1,
+        setup_id="f1_invalidation_control",
+        symbol=SYMBOL,
+        timeframe=TF,
+        enabled=True,
+        expression=ObservationRequirement(
+            type="structure_break", variant="bos", min_count=1
+        ),
+        invalidation=ObservationRequirement(
+            type="structure_break", variant="choch", min_count=1
+        ),
+        name="F1 invalidation control",
+    )
+
+
+def _setup_expiry() -> SetupDef:
+    return SetupDef(
+        schema_version=SCHEMA_VERSION_V1,
+        setup_id="f1_expiry_control",
+        symbol=SYMBOL,
+        timeframe=TF,
+        enabled=True,
+        expression=ThenExpression(
+            steps=(
+                ThenStep(
+                    expression=ObservationRequirement(
+                        type="structure_break", variant="bos", min_count=1
+                    )
+                ),
+                ThenStep(
+                    expression=ObservationRequirement(
+                        type="zone_interaction", variant="rejection", min_count=1
+                    )
+                ),
+            )
+        ),
+        expiry=ExpiryConfig(max_age_candles=1),
+        name="F1 expiry control",
+    )
+
+
+def _script_for_control(control: str) -> dict[int, list[Observation]]:
+    if control == "F1-completion":
+        return {
+            _epoch(92): [_obs("structure_break", _epoch(92), variant="bos")],
+            _epoch(98): [_obs("zone_interaction", _epoch(98), variant="rejection")],
+        }
+    if control == "F1-invalidation":
+        return {
+            _epoch(129): [_obs("structure_break", _epoch(129), variant="choch")],
+        }
+    if control == "F1-expiry":
+        return {
+            _epoch(138): [_obs("structure_break", _epoch(138), variant="bos")],
+        }
+    raise ValueError(control)
+
+
+def _setup_for(control: str) -> SetupDef:
+    return {
+        "F1-completion": _setup_completion,
+        "F1-invalidation": _setup_invalidation,
+        "F1-expiry": _setup_expiry,
+    }[control]()
 
 
 def _fault_schedule(s: int, d: int, fault_class: str) -> dict[int, dict]:
@@ -164,154 +239,147 @@ def _fault_schedule(s: int, d: int, fault_class: str) -> dict[int, dict]:
             sched[i] = {"series_healthy": False}
         elif fault_class == "readiness_blocked":
             sched[i] = {"readiness_ready": False}
-        elif fault_class == "missing_candle":
+        else:
             sched[i] = {"skip_candle": True}
     return sched
 
 
-@pytest.fixture(scope="module")
-def all_scenarios():
-    return generate_stall_scenarios()
-
-
-def test_matrix_has_exactly_24_scenarios(all_scenarios):
-    assert len(all_scenarios) == 24
-    keys = {s["key"] for s in all_scenarios}
-    assert len(keys) == 24
-
-
-def test_matrix_rows_match_contract_values():
-    rows = _f1_rows()
-    assert len(rows) == 8
-    assert rows[0].s == 70 and rows[0].r == 71 and rows[0].t == 98 and rows[0].E == 100
-    assert rows[3].s == 95 and rows[3].r == 100 and rows[3].E == 104
-
-
-@pytest.mark.parametrize("scenario", generate_stall_scenarios(), ids=lambda s: f"{s['control']}_{s['state_at_s']}_{s['fault_class']}_d{s['d']}")
-def test_stall_scenario_runs(scenario):
-    """Run each of the 24 scenarios against a short synthetic completion control.
-
-    Uses phase8a_completion with injected observations as the structural
-    control. Cycle indices from the contract (s=70, t=98, …) are scaled into
-    the short series by mapping contract cycle 0 → local cycle 0 and clamping
-    fault windows into the available range so continuity/fault behaviour is
-    exercised. Evidence status is recorded for the acceptance meta-test.
-    """
-    key = scenario["key"]
-    # Build a series long enough for a few post-arm cycles.
-    n = 30
-    arm = 5
-    raw = json.loads((FIXTURES_8A / "phase8a_completion.json").read_text())
-    setup = parse_setup(raw)
+def _run(control: str, *, n: int, fault_schedule: Optional[dict] = None):
+    setup = _setup_for(control)
     candles = _candles(n)
-
-    # Clean control.
-    det_clean = ScriptedDetector(_completion_script(candles))
-    clean = run_replay(
+    det = ScriptedDetector(_script_for_control(control))
+    return setup, run_replay(
         ReplayRunConfig(
             setups=[setup],
-            detectors=[det_clean],
+            detectors=[det],
             symbol=SYMBOL,
             timeframe=TF,
             timeframe_seconds=TF_SEC,
             candles=candles,
-            arm_count=arm,
+            arm_count=ARM,
+            fault_schedule=fault_schedule or {},
         )
     )
+
+
+def test_matrix_has_exactly_24_scenarios():
+    assert len(generate_stall_scenarios()) == 24
+
+
+def test_matrix_locked_coordinates():
+    rows = f1_rows()
+    assert rows[0] == StallRow("F1-completion", "PENDING", 1, 70, 71, 98, 100)
+    assert rows[3].E == 104
+    assert rows[4].t == 129
+    assert rows[6].t == 139
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    generate_stall_scenarios(),
+    ids=lambda s: f"{s['control']}_{s['state_at_s']}_{s['fault_class']}_d{s['d']}",
+)
+def test_stall_scenario_locked_window(scenario):
+    key = scenario["key"]
+    s, r, t, E = scenario["s"], scenario["r"], scenario["t"], scenario["E"]
+    d = scenario["d"]
+    fc = scenario["fault_class"]
+    control = scenario["control"]
+    n = max(E, t) + 5
+
+    setup, clean = _run(control, n=n)
     clean_terminal = clean.final_setup_states.get(setup.setup_id)
-    # Locate local terminal cycle if any.
-    local_t = None
-    for rec in clean.cycles:
-        if rec.setup_states.get(setup.setup_id) == LifecycleState.COMPLETED.value:
-            if rec.setup_previous_states.get(setup.setup_id) != LifecycleState.COMPLETED.value:
-                local_t = rec.cycle_index
+
+    if control == "F1-completion":
+        assert clean_terminal == LifecycleState.COMPLETED.value, clean_terminal
+        found_t = None
+        for rec in clean.cycles:
+            if (
+                rec.cycle_index == t
+                and rec.setup_states.get(setup.setup_id)
+                == LifecycleState.COMPLETED.value
+            ):
+                found_t = rec.cycle_index
+        assert found_t == t, f"clean completion expected at t={t}, got {found_t}"
+    elif control == "F1-invalidation":
+        assert clean_terminal == LifecycleState.INVALIDATED.value, clean_terminal
+    elif control == "F1-expiry":
+        assert clean_terminal == LifecycleState.EXPIRED.value, clean_terminal
+
+    if scenario["state_at_s"] == "IN_PROGRESS":
+        state_at_s = None
+        for rec in clean.cycles:
+            if rec.cycle_index == s:
+                state_at_s = rec.setup_states.get(setup.setup_id)
                 break
-
-    # Map contract s into local cycle space near the middle of the run.
-    n_cycles = len(clean.cycles)
-    local_s = max(1, min(n_cycles // 3, n_cycles - scenario["d"] - 2))
-    local_d = scenario["d"]
-    if local_s + local_d >= n_cycles:
-        local_s = max(1, n_cycles - local_d - 2)
-    local_r = local_s + local_d
-
-    sched = _fault_schedule(local_s, local_d, scenario["fault_class"])
-    det_fault = ScriptedDetector(_completion_script(candles))
-    faulted = run_replay(
-        ReplayRunConfig(
-            setups=[setup],
-            detectors=[det_fault],
-            symbol=SYMBOL,
-            timeframe=TF,
-            timeframe_seconds=TF_SEC,
-            candles=candles,
-            arm_count=arm,
-            fault_schedule=sched,
+        assert state_at_s == LifecycleState.IN_PROGRESS.value, (
+            f"expected IN_PROGRESS at s={s}, got {state_at_s}"
         )
-    )
 
-    # Assertions: faulted run must not emit a completion signal during the
-    # post-recovery window when continuity is broken.
-    # For readiness_blocked: lifecycle not called during fault interval.
-    if scenario["fault_class"] == "readiness_blocked":
-        for i in range(local_s, local_r):
-            if i < len(faulted.lifecycle_calls_per_cycle):
-                assert faulted.lifecycle_calls_per_cycle[i] == 0, (
-                    f"lifecycle called during readiness block at cycle {i}"
+    setup_f, faulted = _run(control, n=n, fault_schedule=_fault_schedule(s, d, fc))
+
+    if fc == "readiness_blocked":
+        for i, rec in enumerate(faulted.cycles):
+            if s <= rec.cycle_index < r:
+                assert rec.evaluation_blocked or rec.injected_fault == "readiness_blocked"
+                assert faulted.lifecycle_calls_per_cycle[i] == 0
+
+    terminal = {
+        "F1-completion": LifecycleState.COMPLETED.value,
+        "F1-invalidation": LifecycleState.INVALIDATED.value,
+        "F1-expiry": LifecycleState.EXPIRED.value,
+    }[control]
+
+    for rec in faulted.cycles:
+        if r <= rec.cycle_index <= E:
+            st = rec.setup_states.get(setup_f.setup_id)
+            if (
+                st == terminal
+                and rec.setup_previous_states.get(setup_f.setup_id) != terminal
+                and s < t
+            ):
+                pytest.fail(
+                    f"{control}/{fc} reached {terminal} at cycle {rec.cycle_index} "
+                    f"inside r..E after fault at s={s}"
                 )
-            if i < len(faulted.cycles):
-                assert faulted.cycles[i].evaluation_blocked or (
-                    faulted.cycles[i].injected_fault == "readiness_blocked"
+            if rec.signal_ids and s < t:
+                pytest.fail(
+                    f"signal emitted at cycle {rec.cycle_index} inside r..E after fault"
                 )
 
-    # Fault cycles should not advance to COMPLETED.
-    for i in range(local_s, min(local_r, len(faulted.cycles))):
-        st = faulted.cycles[i].setup_states.get(setup.setup_id)
-        # May stay PENDING or IN_PROGRESS; must not newly complete inside fault.
-        if st == LifecycleState.COMPLETED.value:
-            prev = faulted.cycles[i].setup_previous_states.get(setup.setup_id)
-            # Completing inside a readiness/unhealthy/missing window is a failure
-            # only when the clean control would complete later; allow if already
-            # terminal before fault.
-            if prev != LifecycleState.COMPLETED.value and local_t is not None and local_t >= local_s:
-                pytest.fail(f"completed during fault interval at cycle {i}")
-
-    # STALLED report classification for continuity-affecting faults after recovery.
-    report = classify_stalled(
-        faulted,
-        setup.setup_id,
-        injected_fault_cause=scenario["fault_class"],
-    )
-    assert report.injected_fault_cause == scenario["fault_class"]
-    # Readiness-blocked cycles must not appear in subsequent_diagnostic list.
-    if scenario["fault_class"] == "readiness_blocked":
+    report = classify_stalled(faulted, setup_f.setup_id, injected_fault_cause=fc)
+    assert report.injected_fault_cause == fc
+    if fc == "readiness_blocked":
         for bc in report.blocked_cycles:
             assert bc not in report.subsequent_diagnostic_cycles
 
-    # Record evidence — real env (TA-Lib available, real engine path).
-    EVIDENCE[key] = "real_env_passed"
+    if _real_talib_available():
+        EVIDENCE[key] = "real_env_passed"
+    else:
+        EVIDENCE[key] = "stub_only"
 
 
-def test_acceptance_meta_all_scenarios_real_env_passed(all_scenarios):
-    """A15 meta-test: every mandatory scenario must have real_env_passed."""
-    # Ensure parametrized tests have run by checking EVIDENCE was populated.
-    # When this test runs after the parametrized ones (default pytest order),
-    # EVIDENCE should contain all 24 keys.
+def test_acceptance_meta_requires_real_env_for_all_24():
+    scenarios = generate_stall_scenarios()
+    if not EVIDENCE:
+        pytest.fail(
+            "A15 meta-test: no scenario evidence recorded; "
+            "parametrized stall tests must run first and populate EVIDENCE"
+        )
+    if not _real_talib_available():
+        pytest.fail(
+            "A15 meta-test: real TA-Lib is not available; "
+            "cannot assign real_env_passed"
+        )
     missing = []
     bad = []
-    for s in all_scenarios:
+    for s in scenarios:
         key = s["key"]
         status = EVIDENCE.get(key, "not_run")
         if status == "not_run":
             missing.append(key)
         elif status != "real_env_passed":
             bad.append((key, status))
-    # If parametrized tests haven't run yet, trigger a soft message.
-    if missing and len(EVIDENCE) == 0:
-        pytest.skip(
-            "stall scenario tests have not populated EVIDENCE yet; "
-            "run the full file so parametrized cases execute first"
-        )
-    assert not missing, f"scenarios missing evidence: {missing}"
-    assert not bad, f"scenarios without real_env_passed: {bad}"
+    assert not missing, f"missing evidence: {missing}"
+    assert not bad, f"non-real_env_passed: {bad}"
     assert len(EVIDENCE) >= 24

@@ -117,7 +117,7 @@ def test_input_divergence_detected_before_engine():
         timeframe_seconds=TF_SEC,
         candles=candles,
         arm_count=5,
-        fault_schedule={0: {"series_healthy": False}},
+        fault_schedule={4: {"series_healthy": False}},
     )
     b = run_replay(cfg_b)
     cmp = compare_replay_runs(a, b)
