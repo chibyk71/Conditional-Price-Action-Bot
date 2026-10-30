@@ -30,7 +30,7 @@ TF_SEC = 60
 START = 1_700_000_000
 ARM = 60  # first evaluation at candle index 59
 
-EVIDENCE: dict[tuple, str] = {}
+from cpab.replay.evidence import A6_EVIDENCE, A6_MANDATORY_KEYS, STALL_EVIDENCE as EVIDENCE
 
 
 def _real_talib_available() -> bool:
@@ -433,3 +433,25 @@ def test_acceptance_meta_requires_real_env_for_all_24():
     assert not missing, f"missing evidence: {missing}"
     assert not bad, f"non-real_env_passed: {bad}"
     assert len(EVIDENCE) >= 24
+
+
+
+def test_acceptance_meta_a6_real_detector_evidence():
+    """A15: mandatory real-detector A6 fixtures must have real_env_passed."""
+    if not _real_talib_available():
+        pytest.fail("A15: real TA-Lib unavailable")
+    missing = []
+    bad = []
+    for key in A6_MANDATORY_KEYS:
+        status = A6_EVIDENCE.get(key, "not_run")
+        if status == "not_run":
+            missing.append(key)
+        elif status != "real_env_passed":
+            bad.append((key, status))
+    if missing and not A6_EVIDENCE:
+        pytest.fail(
+            "A15 A6 meta-test: A6_EVIDENCE empty — run "
+            "tests/test_phase8b_real_detector_outcomes.py in the same session first"
+        )
+    assert not missing, f"A6 evidence missing: {missing}"
+    assert not bad, f"A6 evidence not real_env_passed: {bad}"

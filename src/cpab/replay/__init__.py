@@ -1,5 +1,6 @@
 """Phase 8B replay, parity, and report-only STALLED classification."""
 
+from cpab.replay.live_style import LiveStyleConfig, live_style_from_replay_config, run_live_style
 from cpab.replay.driver import (
     CycleRecord,
     ReplayResult,
@@ -24,6 +25,9 @@ __all__ = [
     "ReplayResult",
     "ReplayRunConfig",
     "run_replay",
+    "LiveStyleConfig",
+    "run_live_style",
+    "live_style_from_replay_config",
     "INPUT_DIVERGENCE",
     "ParityComparison",
     "compare_replay_runs",

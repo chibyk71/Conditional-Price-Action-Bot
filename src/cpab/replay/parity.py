@@ -41,12 +41,18 @@ class ParityComparison:
 
 
 def _effective_inputs(rec: CycleRecord) -> dict[str, Any]:
+    mon = rec.monitoring or {}
     return {
         "effective_candle_epochs": rec.effective_candle_epochs,
         "effective_detector_names": rec.effective_detector_names,
         "data_ok": rec.data_ok,
         "readiness_state": rec.readiness_state,
         "evaluation_blocked": rec.evaluation_blocked,
+        # Live-style extras when present (A10).
+        "confirm_lag_bars": mon.get("confirm_lag_bars"),
+        "cache_max_size": mon.get("cache_max_size"),
+        "htf_epochs": mon.get("htf_epochs"),
+        "completed_count": mon.get("completed_count"),
     }
 
 
