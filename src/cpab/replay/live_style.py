@@ -14,6 +14,7 @@ from cpab.conditions.schema import SetupDef
 from cpab.core.engine import ConditionEngine
 from cpab.core.observation_store import ObservationStore
 from cpab.detectors.base import PriceActionDetector
+from cpab.market.aggregation import aggregate_from_1m
 from cpab.market.cache import CandleCache
 from cpab.market.readiness import ReadinessManager
 from cpab.market.validation import mark_closed_by_lag
@@ -40,6 +41,9 @@ class LiveStyleConfig:
     fault_schedule: dict[int, dict[str, Any]] = field(default_factory=dict)
     # Optional HTF series (symbol, timeframe, granularity, candles)
     htf: Optional[tuple[str, str, int, Sequence[Candle]]] = None
+    # When set, build HTF from primary 1m via production aggregate_from_1m
+    # (target_timeframe, target_granularity). Overrides htf series.
+    htf_from_1m: Optional[tuple[str, int]] = None
 
 
 class _CacheBackedMarket:
@@ -117,7 +121,12 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
     )
     htf_cache: Optional[CandleCache] = None
     htf_candles: list[Candle] = []
-    if config.htf is not None:
+    if config.htf_from_1m is not None:
+        htf_tf, htf_gran = config.htf_from_1m
+        htf_cache = CandleCache(
+            config.symbol, htf_tf, htf_gran, max_size=config.cache_max_size
+        )
+    elif config.htf is not None:
         htf_sym, htf_tf, htf_gran, htf_series = config.htf
         htf_cache = CandleCache(htf_sym, htf_tf, htf_gran, max_size=config.cache_max_size)
         htf_candles = list(htf_series)
@@ -203,23 +212,38 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
         for c in marked:
             primary.upsert(c)
 
-        if htf_cache is not None and htf_candles:
-            # HTF: include bars whose epoch <= latest primary epoch.
-            htf_window = [c for c in htf_candles if c.epoch <= latest_src.epoch]
-            htf_server = (
-                latest_src.epoch
-                + htf_cache.granularity
-                + config.confirm_lag_bars * htf_cache.granularity
-            )
-            htf_marked = mark_closed_by_lag(
-                htf_window,
-                htf_cache.granularity,
-                htf_server,
-                config.confirm_lag_bars,
-            )
-            htf_cache.clear()
-            for c in htf_marked:
-                htf_cache.upsert(c)
+        if htf_cache is not None:
+            if config.htf_from_1m is not None:
+                # Production path: aggregate HTF from completed 1m bars.
+                htf_tf, htf_gran = config.htf_from_1m
+                completed_1m = primary.completed()
+                aggregated = aggregate_from_1m(
+                    completed_1m,
+                    htf_gran,
+                    htf_tf,
+                    config.symbol,
+                    require_complete=True,
+                )
+                htf_cache.clear()
+                for c in aggregated:
+                    htf_cache.upsert(c)
+            elif htf_candles:
+                # Explicit HTF series path (initialization-style feed).
+                htf_window = [c for c in htf_candles if c.epoch <= latest_src.epoch]
+                htf_server = (
+                    latest_src.epoch
+                    + htf_cache.granularity
+                    + config.confirm_lag_bars * htf_cache.granularity
+                )
+                htf_marked = mark_closed_by_lag(
+                    htf_window,
+                    htf_cache.granularity,
+                    htf_server,
+                    config.confirm_lag_bars,
+                )
+                htf_cache.clear()
+                for c in htf_marked:
+                    htf_cache.upsert(c)
 
         market.set_healthy(series_ok)
 
@@ -342,6 +366,10 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
                 "cache_max_size": config.cache_max_size,
                 "confirm_lag_bars": config.confirm_lag_bars,
                 "htf_epochs": htf_epochs,
+                "htf_source": (
+                    "aggregate_from_1m" if config.htf_from_1m else
+                    ("explicit_series" if config.htf else None)
+                ),
                 "completed_count": len(completed),
             },
             effective_candle_epochs=effective_epochs,

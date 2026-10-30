@@ -99,9 +99,18 @@ def test_replay_vs_live_style_matching_on_identical_inputs():
         )
     )
     cmp = compare_replay_runs(replay, live, setup_ids=[setup.setup_id])
-    # Behavior (states/signals) must match when effective candle sets match.
+    # Behavior must match.
     assert replay.final_setup_states == live.final_setup_states
     assert [s.id for s in replay.signals] == [s.id for s in live.signals]
+    # Effective candle epochs must match (core engine boundary input).
+    for a, b in zip(replay.cycles, live.cycles):
+        assert a.effective_candle_epochs == b.effective_candle_epochs, (
+            a.cycle_index, a.effective_candle_epochs, b.effective_candle_epochs
+        )
+    # Live-style must record production knobs; pure replay leaves them None.
+    # INPUT_DIVERGENCE on lag/cache metadata alone is expected and not a failure
+    # of outcome parity — assert no ENGINE_DIVERGENCE.
+    assert not cmp.engine_divergence, cmp.to_dict()
     # Live-style records production knobs.
     assert live.cycles[0].monitoring is not None
     assert live.cycles[0].monitoring.get("confirm_lag_bars") == 1
@@ -199,3 +208,30 @@ def test_input_divergence_when_cache_caps_differ():
     assert cmp.input_divergence
     assert cmp.first_divergence is not None
     assert cmp.first_divergence.kind == INPUT_DIVERGENCE
+
+
+def test_live_style_htf_from_1m_aggregation():
+    """Production aggregate_from_1m path builds HTF from 1m completed bars."""
+    # 30 minutes of 1m bars → 2 complete 15m HTF bars
+    candles = [make_candle(SYMBOL, TF, 1700000100 + i * TF_SEC, 100.0, 101.0, 99.0, 100.5, is_closed=True) for i in range(45)]
+    live = run_live_style(
+        LiveStyleConfig(
+            setups=[],
+            detectors=[EngulfingDetector()],
+            symbol=SYMBOL,
+            timeframe=TF,
+            timeframe_seconds=TF_SEC,
+            candles=candles,
+            arm_count=15,
+            confirm_lag_bars=1,
+            cache_max_size=500,
+            htf_from_1m=("15m", 900),
+        )
+    )
+    assert live.cycles
+    last = live.cycles[-1]
+    assert last.monitoring is not None
+    assert last.monitoring.get("htf_source") == "aggregate_from_1m"
+    htf_epochs = last.monitoring.get("htf_epochs") or ()
+    # At least one complete 15m bucket from 30 ones
+    assert len(htf_epochs) >= 1
