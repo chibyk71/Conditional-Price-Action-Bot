@@ -16,32 +16,52 @@ STALL_CLEARED = "STALL_CLEARED"
 
 
 def _is_continuity_diagnostic(rec: CycleRecord, setup_id: str) -> bool:
-    """True when the cycle is diagnostic-only for a continuity reason."""
+    """True only when diagnostic-only *and* a continuity reason is present.
+
+    Generic diagnostic-only states without continuity markers are not
+    treated as continuity diagnostics (avoids over-classification).
+    Readiness-blocked cycles are never continuity diagnostics.
+    """
     if rec.evaluation_blocked:
-        return False  # readiness block is not a continuity diagnostic
+        return False
     if not rec.setup_diagnostic_only.get(setup_id, False):
         return False
     reasons = rec.setup_reasons.get(setup_id, ())
     text = " ".join(reasons).lower()
-    # Continuity markers used by the lifecycle evaluator.
     markers = (
         "continu",
         "expected epoch",
+        "expected_epoch",
         "gap",
         "discontinuous",
         "timeframe_seconds",
         "out of order",
         "out-of-order",
+        "missing candle",
+        "series_ok reported false",
+        "data continuity",
     )
     if any(m in text for m in markers):
         return True
-    # After a missing/unhealthy fault, recovery cycles are diagnostic-only
-    # even when the reason string is generic — treat diagnostic_only after
-    # an injected continuity-affecting fault as continuity diagnostic when
-    # data_ok is False or reasons mention health.
-    if not rec.data_ok:
+    # Unhealthy series (data_ok=False) with diagnostic-only is continuity-
+    # related when the engine surfaces health diagnostics.
+    if not rec.data_ok and rec.data_diagnostics:
         return True
-    return bool(rec.setup_diagnostic_only.get(setup_id, False))
+    return False
+
+
+def _parse_expected_epoch(reasons: tuple[str, ...]) -> Optional[int]:
+    """Best-effort extract of expected epoch from engine reason strings."""
+    import re
+
+    for r in reasons:
+        m = re.search(r"expected(?:\s+epoch)?[=\s:]+(\d+)", r, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"expected_epoch[=\s:]+(\d+)", r, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+    return None
 
 
 @dataclass
@@ -109,12 +129,9 @@ def classify_stalled(
                 report.first_discontinuity_last_accepted_epoch = rec.setup_anchors.get(
                     setup_id
                 )
-                # Expected epoch is not always recoverable from diagnostics;
-                # leave None unless present in reason text.
-                for r in reasons:
-                    if "expected" in r.lower():
-                        # best-effort parse is optional
-                        pass
+                report.first_discontinuity_expected_epoch = _parse_expected_epoch(
+                    reasons
+                )
                 report.classification = CONTINUITY_DIAGNOSTIC
             elif k is None and not terminal:
                 # First further diagnostic cycle after j → STALLED.

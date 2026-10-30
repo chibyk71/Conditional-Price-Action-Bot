@@ -318,11 +318,28 @@ def test_stall_scenario_locked_window(scenario):
 
     setup_f, faulted = _run(control, n=n, fault_schedule=_fault_schedule(s, d, fc))
 
+    # State immediately before the fault window (for unchanged-state checks).
+    state_before_fault = None
+    for rec in faulted.cycles:
+        if rec.cycle_index == s - 1:
+            state_before_fault = rec.setup_states.get(setup_f.setup_id)
+            break
+
     if fc == "readiness_blocked":
         for i, rec in enumerate(faulted.cycles):
             if s <= rec.cycle_index < r:
                 assert rec.evaluation_blocked or rec.injected_fault == "readiness_blocked"
                 assert faulted.lifecycle_calls_per_cycle[i] == 0
+
+    # Missing-candle must remain omitted after the fault interval (no backfill).
+    if fc == "missing_candle":
+        omit_ep = _epoch(s)
+        for rec in faulted.cycles:
+            if rec.cycle_index > s:
+                assert omit_ep not in rec.effective_candle_epochs, (
+                    f"omitted candle epoch {omit_ep} reappeared at cycle "
+                    f"{rec.cycle_index} (backfill)"
+                )
 
     terminal = {
         "F1-completion": LifecycleState.COMPLETED.value,
@@ -331,27 +348,60 @@ def test_stall_scenario_locked_window(scenario):
     }[control]
 
     for rec in faulted.cycles:
-        if r <= rec.cycle_index <= E:
+        # Fault interval: lifecycle state must not advance toward terminal.
+        if s <= rec.cycle_index < r and s < t:
+            st = rec.setup_states.get(setup_f.setup_id)
+            if state_before_fault is not None and fc != "readiness_blocked":
+                # State may stay the same or become diagnostic; must not jump
+                # to the clean control's terminal.
+                assert st != terminal or rec.setup_previous_states.get(
+                    setup_f.setup_id
+                ) == terminal, (
+                    f"state advanced to {terminal} during fault at cycle "
+                    f"{rec.cycle_index}"
+                )
+            assert not rec.signal_ids, (
+                f"signal emitted during fault interval at cycle {rec.cycle_index}"
+            )
+
+        # Full post-recovery window r..E.
+        if r <= rec.cycle_index <= E and s < t:
             st = rec.setup_states.get(setup_f.setup_id)
             if (
                 st == terminal
                 and rec.setup_previous_states.get(setup_f.setup_id) != terminal
-                and s < t
             ):
                 pytest.fail(
                     f"{control}/{fc} reached {terminal} at cycle {rec.cycle_index} "
                     f"inside r..E after fault at s={s}"
                 )
-            if rec.signal_ids and s < t:
+            if rec.signal_ids:
                 pytest.fail(
                     f"signal emitted at cycle {rec.cycle_index} inside r..E after fault"
                 )
+            # Continuity-affecting faults: cycles in r..E should be
+            # diagnostic-only when the engine has an active instance.
+            if fc in ("unhealthy", "missing_candle") and st not in (
+                LifecycleState.COMPLETED.value,
+                LifecycleState.INVALIDATED.value,
+                LifecycleState.EXPIRED.value,
+            ):
+                # Prefer diagnostic_only; if the engine has not yet opened an
+                # instance, PENDING without diagnostic is acceptable only
+                # before any acceptance.
+                if st != LifecycleState.PENDING.value:
+                    assert rec.setup_diagnostic_only.get(setup_f.setup_id, False), (
+                        f"expected diagnostic_only at cycle {rec.cycle_index} "
+                        f"in r..E after {fc}, state={st}"
+                    )
 
     report = classify_stalled(faulted, setup_f.setup_id, injected_fault_cause=fc)
     assert report.injected_fault_cause == fc
     if fc == "readiness_blocked":
         for bc in report.blocked_cycles:
             assert bc not in report.subsequent_diagnostic_cycles
+        # Readiness blocks are not continuity diagnostics.
+        assert report.classification in ("", "CONTINUITY_DIAGNOSTIC", "STALLED", "STALL_CLEARED")
 
     if _real_talib_available():
         EVIDENCE[key] = "real_env_passed"

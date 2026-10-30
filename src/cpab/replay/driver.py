@@ -95,6 +95,8 @@ class ReplayResult:
             "type_report_warnings": list(self.type_report_warnings),
             "required_types": list(self.required_types),
             "wired_types": list(self.wired_types),
+            "lifecycle_calls_per_cycle": list(self.lifecycle_calls_per_cycle),
+            "input_diagnostics": list(self.input_diagnostics),
         }
 
 
@@ -217,6 +219,9 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
     detector_names = tuple(
         getattr(d, "name", type(d).__name__) for d in detectors
     )
+    # Epochs omitted by missing-candle faults stay omitted for the rest of the
+    # run (A14: no backfill / no gap repair). Later candles still arrive.
+    omitted_epochs: set[int] = set()
 
     # Arm: present first arm_count candles, then evaluate once per additional candle.
     # cycle_index = series index of the latest visible candle (contract-aligned:
@@ -225,21 +230,29 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
     start_eval_at = max(config.arm_count, 1)
     for end_idx in range(start_eval_at, n + 1):
         cycle_idx = end_idx - 1
-        visible = list(all_candles[:end_idx])
         fault = config.fault_schedule.get(cycle_idx, {})
         injected: Optional[str] = None
 
-        # Apply fault schedule.
+        # Apply fault schedule before building the visible series so a
+        # missing-candle fault permanently omits that bar.
         series_ok = config.series_healthy
         if "series_healthy" in fault:
             series_ok = bool(fault["series_healthy"])
             if not series_ok:
                 injected = "unhealthy"
         if fault.get("skip_candle"):
-            # Missing candle: drop the latest candle from the series.
-            if len(visible) > 1:
-                visible = visible[:-1]
+            # Permanently omit the candle that would have been the latest at
+            # this cycle index. Subsequent cycles must not reintroduce it.
+            omit_c = all_candles[cycle_idx] if cycle_idx < len(all_candles) else None
+            if omit_c is not None:
+                omitted_epochs.add(omit_c.epoch)
             injected = injected or "missing_candle"
+
+        visible = [
+            c
+            for c in all_candles[:end_idx]
+            if c.epoch not in omitted_epochs
+        ]
         market.set_candles(visible)
         market.set_healthy(series_ok)
 
