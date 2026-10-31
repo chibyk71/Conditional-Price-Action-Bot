@@ -192,52 +192,58 @@ def parse_setups_analyst(raw_list: Any) -> list[SetupDef]:
     return setups
 
 
-def _detector_emittable_types(detectors: Sequence[PriceActionDetector]) -> set[str]:
-    """Best-effort set of types the supplied detectors can emit.
+# Explicit emitted-type registry keyed by detector class name (C5).
+# Unknown classes report "unknown" via report helpers, not substring matching.
+DETECTOR_EMITTED_TYPES: dict[str, frozenset[str]] = {
+    "EngulfingDetector": frozenset({"bullish_engulfing", "bearish_engulfing"}),
+    "ImpulseDetector": frozenset({"bullish_impulse", "bearish_impulse"}),
+    "MarketStructureDetector": frozenset({"market_structure"}),
+    "StructureBreakDetector": frozenset({"structure_break"}),
+    "BreakerBlockDetector": frozenset({"breaker_block"}),
+    "OrderBlockDetector": frozenset({"order_block"}),
+    "ZonePolarityFlipDetector": frozenset({"zone_polarity_flip"}),
+    "SwingDetector": frozenset({"swing_high", "swing_low"}),
+    "SupportResistanceZoneDetector": frozenset({"support_resistance_zone"}),
+    "FairValueGapDetector": frozenset({"fair_value_gap"}),
+    "InverseFairValueGapDetector": frozenset({"inverse_fair_value_gap"}),
+    "ATRExpansionDetector": frozenset({"atr_expansion"}),
+    "ATRContractionDetector": frozenset({"atr_contraction"}),
+    "RangeExpansionDetector": frozenset({"range_expansion"}),
+    "ClassicalReversalDetector": frozenset({
+        "double_top", "double_bottom", "head_and_shoulders", "inverse_head_and_shoulders",
+    }),
+}
 
-    Uses detector class name heuristics and optional ``emits`` / ``name``
-    attributes. This is a wiring report aid, not a capability registry.
+
+def _detector_emittable_types(detectors: Sequence[PriceActionDetector]) -> set[str]:
+    """Set of types the supplied detectors can emit via explicit declarations.
+
+    Preference: ``detector.emitted_types`` attribute, then class registry.
+    Unknown detector classes contribute nothing here; callers may report
+    them as "unknown" rather than "wired"/"not wired".
     """
     emitted: set[str] = set()
     for det in detectors:
-        name = getattr(det, "name", type(det).__name__).lower()
-        # Common mappings from detector names to emitted types.
-        mapping = {
-            "engulfing": {"bullish_engulfing", "bearish_engulfing"},
-            "impulse": {"bullish_impulse", "bearish_impulse"},
-            "market_structure": {"market_structure"},
-            "structure_break": {"structure_break"},
-            "breaker": {"breaker_block"},
-            "order_block": {"order_block"},
-            "zone_polarity": {"zone_polarity_flip"},
-            "swing": {"swing_high", "swing_low"},
-            "support_resistance": {"support_resistance_zone"},
-            "equal": {
-                "equal_high_level",
-                "equal_low_level",
-                "equal_high_level_touch",
-                "equal_low_level_touch",
-            },
-            "fair_value_gap": {"fair_value_gap"},
-            "inverse_fair": {"inverse_fair_value_gap"},
-            "atr_expansion": {"atr_expansion"},
-            "atr_contraction": {"atr_contraction"},
-            "range_expansion": {"range_expansion"},
-            "classical": {
-                "double_top",
-                "double_bottom",
-                "head_and_shoulders",
-                "inverse_head_and_shoulders",
-            },
-        }
-        for key, types in mapping.items():
-            if key in name:
-                emitted |= types
-        # Explicit attribute if present.
         extra = getattr(det, "emitted_types", None)
         if extra:
             emitted |= set(extra)
+            continue
+        cls_name = type(det).__name__
+        if cls_name in DETECTOR_EMITTED_TYPES:
+            emitted |= set(DETECTOR_EMITTED_TYPES[cls_name])
     return emitted
+
+
+def detector_wiring_status(detectors: Sequence[PriceActionDetector]) -> dict[str, str]:
+    """Per-detector class wiring label: 'declared' or 'unknown'."""
+    out: dict[str, str] = {}
+    for det in detectors:
+        cls_name = type(det).__name__
+        if getattr(det, "emitted_types", None) or cls_name in DETECTOR_EMITTED_TYPES:
+            out[cls_name] = "declared"
+        else:
+            out[cls_name] = "unknown"
+    return out
 
 
 def report_setup_types(

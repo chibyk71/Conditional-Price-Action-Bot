@@ -1,3 +1,7 @@
+# NOT APPROVED — proposal only
+
+This document is **not** part of revision 8 acceptance. Seed fixtures under tests/fixtures/phase8b/ are the contract series.
+
 # Phase 8B — Proposed amendment: A6 constructed fixture series (not yet approved)
 
 **Status:** PROPOSED — does not amend revision 8 until explicitly approved.  

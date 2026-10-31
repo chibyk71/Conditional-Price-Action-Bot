@@ -6,6 +6,8 @@ use the exact contract coordinates. A15 requires a verified real-TA-Lib import.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -26,40 +28,16 @@ from conftest import make_candle
 from cpab.detectors.breaker_block import BreakerBlockDetector
 from cpab.detectors.behavior_volatility import ImpulseDetector
 
-SYMBOL = "R_100"
-TF = "1m"
-TF_SEC = 60
-START = 1_700_000_000
+SYMBOL = "stpRNG"
+TF = "15m"
+TF_SEC = 900
+START = 1_699_992_000
 ARM = 60  # first evaluation at candle index 59
 
 from cpab.replay.evidence import A6_EVIDENCE, A6_MANDATORY_KEYS, STALL_EVIDENCE as EVIDENCE, clear_evidence, load_manifest, record_a6, record_stall
 
 
-def _real_talib_available() -> bool:
-    """Require a real TA-Lib C extension usable by project detectors."""
-    try:
-        import talib
-        from talib.abstract import Function
-        import numpy as np
-
-        ver = getattr(talib, "__version__", None)
-        if not ver:
-            return False
-        # Exercise the C path, not merely import.
-        lb = int(Function("CDLENGULFING").lookback)
-        if lb < 0:
-            return False
-        # Minimal array call through the extension.
-        opens = np.array([1.0, 1.1, 1.0, 0.9, 1.2], dtype=float)
-        highs = np.array([1.2, 1.3, 1.1, 1.0, 1.3], dtype=float)
-        lows = np.array([0.9, 1.0, 0.9, 0.8, 1.0], dtype=float)
-        closes = np.array([1.1, 1.0, 0.95, 1.15, 1.25], dtype=float)
-        out = talib.CDLENGULFING(opens, highs, lows, closes)
-        if out is None or len(out) != 5:
-            return False
-        return True
-    except Exception:
-        return False
+from cpab.replay.real_talib import real_talib_available as _real_talib_available
 
 
 class ScriptedDetector(PriceActionDetector):
@@ -282,83 +260,47 @@ def _fault_schedule(s: int, d: int, fault_class: str) -> dict[int, dict]:
     return sched
 
 
-def _f1_completion_series(n: int) -> list:
-    """Real-detector F1 completion series: impulse at index 98."""
-    pad = [(10.0, 10.1, 9.9, 10.0)] * 70
-    base = [
-        (10.0, 10.5, 9.5, 10.0),
-        (10.0, 12.0, 9.8, 11.0),
-        (11.0, 11.2, 10.5, 10.8),
-        (11.0, 11.2, 9.8, 10.0),
-        (10.0, 10.5, 9.9, 10.2),
-        (10.2, 13.5, 10.0, 13.0),
-        (13.0, 13.2, 12.5, 12.8),
-        (12.8, 12.9, 9.0, 9.5),
-    ] + [(9.5, 9.6, 9.4, 9.5)] * 20 + [(9.5, 9.6, 5.0, 5.2)]
-    rows = pad + base
-    # Extend with quiet bars to length n
-    while len(rows) < n:
-        rows.append((9.5, 9.55, 9.45, 9.5))
-    rows = rows[:n]
-    return [
-        make_candle(SYMBOL, TF, START + i * TF_SEC, o, h, l, c, is_closed=True)
-        for i, (o, h, l, c) in enumerate(rows)
-    ]
+
+FIXTURES_8B = Path(__file__).resolve().parent / "fixtures" / "phase8b"
+SEED_START = 1_699_992_000
+SEED_STEP = 900
 
 
-def _f1_invalidation_series(n: int) -> list:
-    """Real-detector F1 invalidation: bearish_to_bullish at index 129."""
-    inv_rows = [
-        (10.0, 10.5, 9.5, 10.0),
-        (10.0, 10.2, 8.0, 9.0),
-        (9.0, 9.5, 8.5, 9.2),
-        (9.0, 10.0, 8.8, 9.8),
-        (9.8, 10.0, 9.5, 9.6),
-        (9.6, 9.7, 7.0, 7.2),
-        (7.2, 7.3, 7.0, 7.1),
-        (7.1, 10.5, 7.0, 10.2),
-    ]
-    pad = [(10.0, 10.1, 9.9, 10.0)] * 122
-    rows = pad + inv_rows
-    while len(rows) < n:
-        rows.append((10.0, 10.05, 9.95, 10.0))
-    rows = rows[:n]
-    return [
-        make_candle(SYMBOL, TF, START + i * TF_SEC, o, h, l, c, is_closed=True)
-        for i, (o, h, l, c) in enumerate(rows)
-    ]
+def _load_seed_candles(case_key: str) -> list:
+    import json
+    meta = json.loads((FIXTURES_8B / "manifest.json").read_text())["cases"][case_key]
+    data = json.loads((FIXTURES_8B / meta["file"]).read_text())
+    out = []
+    for row in data["candles"]:
+        epoch, o, h, l, c = row
+        out.append(
+            make_candle(
+                data["symbol"],
+                data["timeframe"],
+                int(epoch),
+                float(o),
+                float(h),
+                float(l),
+                float(c),
+                is_closed=True,
+            )
+        )
+    return out
 
 
-def _f1_expiry_series(n: int) -> list:
-    """Real-detector F1 expiry: breaker near 59, no impulse → EXPIRED by 139 (max_age 80)."""
-    pad = [(10.0, 10.1, 9.9, 10.0)] * 50
-    base = [
-        (10.0, 10.5, 9.5, 10.0),
-        (10.0, 12.0, 9.8, 11.0),
-        (11.0, 11.2, 10.5, 10.8),
-        (11.0, 11.2, 9.8, 10.0),
-        (10.0, 10.5, 9.9, 10.2),
-        (10.2, 13.5, 10.0, 13.0),
-        (13.0, 13.2, 12.5, 12.8),
-        (12.8, 12.9, 9.0, 9.5),
-    ]
-    quiet = [(9.5, 9.55, 9.45, 9.5)] * max(n, 150)
-    rows = (pad + base + quiet)[:n]
-    return [
-        make_candle(SYMBOL, TF, START + i * TF_SEC, o, h, l, c, is_closed=True)
-        for i, (o, h, l, c) in enumerate(rows)
-    ]
+def _seed_case_for(control: str) -> str:
+    return {
+        "F1-completion": "F1_completion_seed3",
+        "F1-invalidation": "F1_invalidation_seed1",
+        "F1-expiry": "F1_expiry_seed4",
+    }[control]
 
 
 def _run(control: str, *, n: int, fault_schedule: Optional[dict] = None):
-    """Run with real F1 detector chain (BreakerBlock + Impulse), not ScriptedDetector."""
+    """Run with real F1 detectors on contract seed series (C1.3)."""
     setup = _setup_for(control)
-    if control == "F1-completion":
-        candles = _f1_completion_series(n)
-    elif control == "F1-invalidation":
-        candles = _f1_invalidation_series(n)
-    else:
-        candles = _f1_expiry_series(n)
+    candles = _load_seed_candles(_seed_case_for(control))
+    # n is advisory; seed series is 220 candles — use full series for arming/eval.
     dets = [
         BreakerBlockDetector(left_strength=1, right_strength=1),
         ImpulseDetector(),
@@ -367,9 +309,9 @@ def _run(control: str, *, n: int, fault_schedule: Optional[dict] = None):
         ReplayRunConfig(
             setups=[setup],
             detectors=dets,
-            symbol=SYMBOL,
-            timeframe=TF,
-            timeframe_seconds=TF_SEC,
+            symbol=setup.symbol,
+            timeframe=setup.timeframe,
+            timeframe_seconds=SEED_STEP,
             candles=candles,
             arm_count=ARM,
             fault_schedule=fault_schedule or {},
@@ -433,99 +375,116 @@ def test_stall_scenario_locked_window(scenario):
 
     setup_f, faulted = _run(control, n=n, fault_schedule=_fault_schedule(s, d, fc))
 
-    # State immediately before the fault window (for unchanged-state checks).
+    # Snapshot state/anchor before fault for unchanged checks.
     state_before_fault = None
+    anchor_before_fault = None
     for rec in faulted.cycles:
         if rec.cycle_index == s - 1:
             state_before_fault = rec.setup_states.get(setup_f.setup_id)
+            anchor_before_fault = rec.setup_anchors.get(setup_f.setup_id)
             break
 
     if fc == "readiness_blocked":
         for i, rec in enumerate(faulted.cycles):
             if s <= rec.cycle_index < r:
                 assert rec.evaluation_blocked or rec.injected_fault == "readiness_blocked"
-                assert faulted.lifecycle_calls_per_cycle[i] == 0
+                assert faulted.lifecycle_calls_per_cycle[i] == 0, (
+                    f"lifecycle calls must be 0 on blocked cycle {rec.cycle_index}"
+                )
 
-    # Missing-candle must remain omitted after the fault interval (no backfill).
     if fc == "missing_candle":
-        omit_ep = _epoch(s)
+        omit_ep = START + s * TF_SEC
         for rec in faulted.cycles:
             if rec.cycle_index > s:
                 assert omit_ep not in rec.effective_candle_epochs, (
-                    f"omitted candle epoch {omit_ep} reappeared at cycle "
-                    f"{rec.cycle_index} (backfill)"
+                    f"omitted candle epoch {omit_ep} reappeared at cycle {rec.cycle_index}"
                 )
 
-    terminal = {
-        "F1-completion": LifecycleState.COMPLETED.value,
-        "F1-invalidation": LifecycleState.INVALIDATED.value,
-        "F1-expiry": LifecycleState.EXPIRED.value,
-    }[control]
-
+    # C3: r..E — no terminal, no signal; diagnostic continuity for unhealthy/missing.
     for rec in faulted.cycles:
-        # Fault interval: lifecycle state must not advance toward terminal.
-        if s <= rec.cycle_index < r and s < t:
-            st = rec.setup_states.get(setup_f.setup_id)
-            if state_before_fault is not None and fc != "readiness_blocked":
-                # State may stay the same or become diagnostic; must not jump
-                # to the clean control's terminal.
-                assert st != terminal or rec.setup_previous_states.get(
-                    setup_f.setup_id
-                ) == terminal, (
-                    f"state advanced to {terminal} during fault at cycle "
-                    f"{rec.cycle_index}"
+        if not (r <= rec.cycle_index <= E):
+            continue
+        st = rec.setup_states.get(setup_f.setup_id)
+        if st in (
+            LifecycleState.COMPLETED.value,
+            LifecycleState.INVALIDATED.value,
+            LifecycleState.EXPIRED.value,
+        ):
+            pytest.fail(f"terminal {st} at cycle {rec.cycle_index} inside r..E after {fc}")
+        if rec.signal_ids:
+            pytest.fail(f"signal at cycle {rec.cycle_index} inside r..E after {fc}")
+        if fc in ("unhealthy", "missing_candle"):
+            assert rec.setup_diagnostic_only.get(setup_f.setup_id, False), (
+                f"expected diagnostic_only at cycle {rec.cycle_index} in r..E after {fc}, state={st}"
+            )
+            reasons = " ".join(rec.setup_reasons.get(setup_f.setup_id, ()))
+            # Continuity reason must name expected/actual when epoch gap exists;
+            # unhealthy may remain data-not-ok until recovery then discontinuous.
+            if fc == "missing_candle":
+                assert "discontinuous evaluation candle" in reasons or "expected" in reasons.lower(), (
+                    f"missing continuity reason at {rec.cycle_index}: {reasons!r}"
                 )
-            assert not rec.signal_ids, (
-                f"signal emitted during fault interval at cycle {rec.cycle_index}"
+        if fc == "readiness_blocked" and rec.cycle_index >= r:
+            # Post-recovery through E: diagnostic_only from first post-block cycle.
+            assert rec.setup_diagnostic_only.get(setup_f.setup_id, False) or st == state_before_fault, (
+                f"post-block cycle {rec.cycle_index} expected diagnostic or frozen state"
             )
 
-        # Full post-recovery window r..E.
-        if r <= rec.cycle_index <= E and s < t:
-            st = rec.setup_states.get(setup_f.setup_id)
-            if (
-                st == terminal
-                and rec.setup_previous_states.get(setup_f.setup_id) != terminal
-            ):
-                pytest.fail(
-                    f"{control}/{fc} reached {terminal} at cycle {rec.cycle_index} "
-                    f"inside r..E after fault at s={s}"
+    # Fault interval: lifecycle state and anchor must not advance during [s, r-1]
+    # (except readiness has zero lifecycle calls).
+    if fc != "readiness_blocked" and state_before_fault is not None:
+        for rec in faulted.cycles:
+            if s <= rec.cycle_index < r:
+                st = rec.setup_states.get(setup_f.setup_id)
+                assert st == state_before_fault or rec.setup_diagnostic_only.get(setup_f.setup_id, False), (
+                    f"state changed during fault interval at {rec.cycle_index}: "
+                    f"{state_before_fault} -> {st}"
                 )
-            if rec.signal_ids:
-                pytest.fail(
-                    f"signal emitted at cycle {rec.cycle_index} inside r..E after fault"
-                )
-            # Continuity-affecting faults: cycles in r..E should be
-            # diagnostic-only when the engine has an active instance.
-            if fc in ("unhealthy", "missing_candle") and st not in (
-                LifecycleState.COMPLETED.value,
-                LifecycleState.INVALIDATED.value,
-                LifecycleState.EXPIRED.value,
-            ):
-                # Prefer diagnostic_only; if the engine has not yet opened an
-                # instance, PENDING without diagnostic is acceptable only
-                # before any acceptance.
-                if st != LifecycleState.PENDING.value:
-                    assert rec.setup_diagnostic_only.get(setup_f.setup_id, False), (
-                        f"expected diagnostic_only at cycle {rec.cycle_index} "
-                        f"in r..E after {fc}, state={st}"
-                    )
-                elif scenario["state_at_s"] == "IN_PROGRESS":
-                    # Active instance that reports PENDING in r..E after a
-                    # continuity fault is a continuity failure unless diagnostic.
-                    assert rec.setup_diagnostic_only.get(setup_f.setup_id, False) or (
-                        state_before_fault == LifecycleState.PENDING.value
-                    ), (
-                        f"IN_PROGRESS control at cycle {rec.cycle_index} in r..E "
-                        f"after {fc} must be diagnostic_only (got PENDING without diagnostic)"
-                    )
 
     report = classify_stalled(faulted, setup_f.setup_id, injected_fault_cause=fc)
     assert report.injected_fault_cause == fc
+
     if fc == "readiness_blocked":
+        expected_blocked = list(range(s, r))
+        injected_blocked = [
+            rec.cycle_index
+            for rec in faulted.cycles
+            if rec.injected_fault == "readiness_blocked"
+        ]
+        assert injected_blocked == expected_blocked, (injected_blocked, expected_blocked)
+        # report.blocked_cycles includes evaluation_blocked; may contain one sticky
+        # post-interval cycle (engine monitoring lag). Require prefix match.
+        assert report.blocked_cycles[: len(expected_blocked)] == expected_blocked, (
+            f"blocked_cycles prefix expected {expected_blocked}, got {report.blocked_cycles}"
+        )
+        assert len(report.blocked_cycles) <= len(expected_blocked) + 1, report.blocked_cycles
         for bc in report.blocked_cycles:
             assert bc not in report.subsequent_diagnostic_cycles
-        # Readiness blocks are not continuity diagnostics.
-        assert report.classification in ("", "CONTINUITY_DIAGNOSTIC", "STALLED", "STALL_CLEARED")
+        # First discontinuity is first cycle after the blocked interval (r), when present.
+        if report.first_discontinuity_cycle is not None:
+            assert report.first_discontinuity_cycle >= r, report.first_discontinuity_cycle
+            if report.stalled_classified_at is not None:
+                assert report.stalled_classified_at == report.first_discontinuity_cycle + 1
+    elif fc == "missing_candle":
+        # Continuity diagnostic at r (first post-fault evaluation with gap).
+        assert report.first_discontinuity_cycle == r, (
+            f"first_discontinuity_cycle expected {r}, got {report.first_discontinuity_cycle}"
+        )
+        assert report.stalled_classified_at == r + 1, (
+            f"stalled_classified_at expected {r+1}, got {report.stalled_classified_at}"
+        )
+        assert report.blocked_cycles == []
+        assert report.first_discontinuity_expected_epoch is not None
+        assert report.first_discontinuity_actual_epoch is not None
+        assert report.first_discontinuity_expected_epoch != report.first_discontinuity_actual_epoch
+    else:
+        # unhealthy: health diagnostics must not set continuity j by themselves.
+        # If a continuity discontinuity appears, it must be at/after r.
+        assert report.blocked_cycles == []
+        if report.first_discontinuity_cycle is not None:
+            assert report.first_discontinuity_cycle >= r
+            if report.stalled_classified_at is not None:
+                assert report.stalled_classified_at == report.first_discontinuity_cycle + 1
 
     status = "real_env_passed" if _real_talib_available() else "stub_only"
     EVIDENCE[key] = status
@@ -544,6 +503,8 @@ def test_acceptance_meta_requires_real_env_for_all_24():
     manifest = load_manifest()
     run = manifest.get("run") or {}
     assert run.get("commit"), f"A15 run identity missing: {run}"
+    assert run.get("talib_version"), f"A15 missing talib_version: {run}"
+    assert run.get("talib_file"), f"A15 missing talib_file: {run}"
     stall = manifest.get("stall") or {}
     missing = []
     bad = []
@@ -568,6 +529,8 @@ def test_acceptance_meta_a6_real_detector_evidence():
     manifest = load_manifest()
     run = manifest.get("run") or {}
     assert run.get("commit"), f"A15 run identity missing: {run}"
+    assert run.get("talib_version"), f"A15 missing talib_version: {run}"
+    assert run.get("talib_file"), f"A15 missing talib_file: {run}"
     a6 = manifest.get("a6") or {}
     missing = []
     bad = []

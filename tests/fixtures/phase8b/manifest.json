@@ -1,0 +1,75 @@
+{
+ "note": "Synthetic candles produced with a TA-Lib STUB-era generator; transitions are VERIFIED-STUB only. Candle bytes are the fixture; the generator is not required. First evaluation at candle idx 59; epoch(i)=1699992000+900*i; symbol stpRNG, 15m.",
+ "cases": {
+  "F1_completion_seed3": {
+   "file": "candles/F1_completion_seed3.json",
+   "sha256": "1dfd115e71e5703738aeb33346aa8e05507acec8ba0d7f97111ad6c889b00be5",
+   "n_candles": 220,
+   "first_epoch": 1699992000,
+   "setup": "fx_bearish_breaker_then_impulse",
+   "expected_terminal": "COMPLETED",
+   "expected_transition_idx": 98,
+   "note": "IN_PROGRESS at 92"
+  },
+  "F1_expiry_seed4": {
+   "file": "candles/F1_expiry_seed4.json",
+   "sha256": "cbe0697bdecc9cb11826a74592861cbadcd0e23367dacf7d1090381af040d599",
+   "n_candles": 220,
+   "first_epoch": 1699992000,
+   "setup": "fx_bearish_breaker_then_impulse",
+   "expected_terminal": "EXPIRED",
+   "expected_transition_idx": 139,
+   "note": null
+  },
+  "F1_invalidation_seed1": {
+   "file": "candles/F1_invalidation_seed1.json",
+   "sha256": "a1b66ff3da6bad3dedd4df8a24cf32cf8d655a119b0a0e93d3a932717e13dad9",
+   "n_candles": 220,
+   "first_epoch": 1699992000,
+   "setup": "fx_bearish_breaker_then_impulse",
+   "expected_terminal": "INVALIDATED",
+   "expected_transition_idx": 129,
+   "note": null
+  },
+  "F2_completion_seed4": {
+   "file": "candles/F2_completion_seed4.json",
+   "sha256": "62ce8dee2f7fa2cef1a9575891c3146bd7ec7d8a9866cec1bba6370df1923288",
+   "n_candles": 220,
+   "first_epoch": 1699992000,
+   "setup": "fx_bullish_higher_low_trigger",
+   "expected_terminal": "COMPLETED",
+   "expected_transition_idx": 76,
+   "note": "hl event 75, confirmed 76"
+  },
+  "F2_invalidation_seed7": {
+   "file": "candles/F2_invalidation_seed7.json",
+   "sha256": "dfcfdc7b0c670abd4bcc43b9ce9ab72a03ca267ea90229d91c74070e39c31688",
+   "n_candles": 220,
+   "first_epoch": 1699992000,
+   "setup": "fx_bullish_higher_low_trigger",
+   "expected_terminal": "INVALIDATED",
+   "expected_transition_idx": 93,
+   "note": "ll event 92, confirmed 93"
+  },
+  "F3_completion_seed1": {
+   "file": "candles/F3_completion_seed1.json",
+   "sha256": "a1b66ff3da6bad3dedd4df8a24cf32cf8d655a119b0a0e93d3a932717e13dad9",
+   "n_candles": 220,
+   "first_epoch": 1699992000,
+   "setup": "fx_bearish_flip_then_engulfing",
+   "expected_terminal": "COMPLETED",
+   "expected_transition_idx": 98,
+   "note": "IN_PROGRESS at 72"
+  },
+  "F3_invalidation_seed23": {
+   "file": "candles/F3_invalidation_seed23.json",
+   "sha256": "35f02aa46c23ebe6c67bbd13251ef3fd9112fef929c1702efdb43a206c5403fb",
+   "n_candles": 220,
+   "first_epoch": 1699992000,
+   "setup": "fx_bearish_flip_then_engulfing",
+   "expected_terminal": "INVALIDATED",
+   "expected_transition_idx": 79,
+   "note": null
+  }
+ }
+}

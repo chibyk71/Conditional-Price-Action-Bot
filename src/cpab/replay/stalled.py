@@ -5,6 +5,7 @@ Does not alter lifecycle or continuity policy.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional, Sequence
 
@@ -14,53 +15,59 @@ CONTINUITY_DIAGNOSTIC = "CONTINUITY_DIAGNOSTIC"
 STALLED = "STALLED"
 STALL_CLEARED = "STALL_CLEARED"
 
+# Exact engine format from lifecycle.py:
+# "discontinuous evaluation candle {actual}; expected {expected} after last accepted
+#  {last} (timeframe_seconds={tf})"
+_CONTINUITY_RE = re.compile(
+    r"discontinuous evaluation candle (\d+);\s*expected (\d+) after last accepted (\d+)"
+    r"(?:\s*\(timeframe_seconds=(\d+)\))?",
+    re.IGNORECASE,
+)
+
+
+def _continuity_match(reasons: tuple[str, ...]) -> Optional[re.Match[str]]:
+    for r in reasons:
+        m = _CONTINUITY_RE.search(r)
+        if m:
+            return m
+    return None
+
 
 def _is_continuity_diagnostic(rec: CycleRecord, setup_id: str) -> bool:
-    """True only when diagnostic-only *and* a continuity reason is present.
+    """True only for diagnostic-only cycles with the engine continuity reason.
 
-    Generic diagnostic-only states without continuity markers are not
-    treated as continuity diagnostics (avoids over-classification).
+    Health-fault diagnostics (data_ok=False without epoch discontinuity) do NOT
+    count as continuity diagnostics (contract section 3 / C2).
     Readiness-blocked cycles are never continuity diagnostics.
     """
     if rec.evaluation_blocked:
         return False
+    if rec.injected_fault == "readiness_blocked":
+        return False
     if not rec.setup_diagnostic_only.get(setup_id, False):
         return False
     reasons = rec.setup_reasons.get(setup_id, ())
-    text = " ".join(reasons).lower()
-    markers = (
-        "continu",
-        "expected epoch",
-        "expected_epoch",
-        "gap",
-        "discontinuous",
-        "timeframe_seconds",
-        "out of order",
-        "out-of-order",
-        "missing candle",
-        "series_ok reported false",
-        "data continuity",
-    )
-    if any(m in text for m in markers):
-        return True
-    # Unhealthy series (data_ok=False) with diagnostic-only is continuity-
-    # related when the engine surfaces health diagnostics.
-    if not rec.data_ok and rec.data_diagnostics:
-        return True
-    return False
+    return _continuity_match(reasons) is not None
 
 
 def _parse_expected_epoch(reasons: tuple[str, ...]) -> Optional[int]:
-    """Best-effort extract of expected epoch from engine reason strings."""
-    import re
+    m = _continuity_match(reasons)
+    if m:
+        return int(m.group(2))
+    return None
 
-    for r in reasons:
-        m = re.search(r"expected(?:\s+epoch)?[=\s:]+(\d+)", r, re.IGNORECASE)
-        if m:
-            return int(m.group(1))
-        m = re.search(r"expected_epoch[=\s:]+(\d+)", r, re.IGNORECASE)
-        if m:
-            return int(m.group(1))
+
+def _parse_actual_epoch_from_reason(reasons: tuple[str, ...]) -> Optional[int]:
+    m = _continuity_match(reasons)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _parse_last_accepted_from_reason(reasons: tuple[str, ...]) -> Optional[int]:
+    m = _continuity_match(reasons)
+    if m:
+        return int(m.group(3))
     return None
 
 
@@ -93,10 +100,10 @@ def classify_stalled(
     """Classify STALLED / CONTINUITY_DIAGNOSTIC / STALL_CLEARED from cycle records.
 
     Threshold (section 3):
-      j = first cycle where lifecycle returns diagnostic_only with continuity reason.
+      j = first cycle where lifecycle returns diagnostic_only with continuity reason
+          (expected≠actual epoch). Health faults alone do not set j.
       STALLED at first k > j where instance non-terminal, a further candle arrived,
       and cycle k is also diagnostic_only for continuity.
-      Until then the report shows CONTINUITY_DIAGNOSTIC.
       Readiness-blocked cycles neither start nor end the count.
     """
     report = StallReport(setup_id=setup_id, classification="")
@@ -109,9 +116,7 @@ def classify_stalled(
     engine_reasons: list[str] = []
 
     for rec in result.cycles:
-        if rec.evaluation_blocked or (
-            rec.injected_fault == "readiness_blocked"
-        ):
+        if rec.evaluation_blocked or rec.injected_fault == "readiness_blocked":
             blocked.append(rec.cycle_index)
             continue
 
@@ -125,30 +130,30 @@ def classify_stalled(
             if j is None:
                 j = rec.cycle_index
                 report.first_discontinuity_cycle = j
-                report.first_discontinuity_actual_epoch = rec.candle_epoch
-                report.first_discontinuity_last_accepted_epoch = rec.setup_anchors.get(
-                    setup_id
+                report.first_discontinuity_actual_epoch = (
+                    _parse_actual_epoch_from_reason(reasons) or rec.candle_epoch
                 )
-                report.first_discontinuity_expected_epoch = _parse_expected_epoch(
-                    reasons
+                report.first_discontinuity_last_accepted_epoch = (
+                    _parse_last_accepted_from_reason(reasons)
+                    or rec.setup_anchors.get(setup_id)
                 )
+                report.first_discontinuity_expected_epoch = _parse_expected_epoch(reasons)
                 report.classification = CONTINUITY_DIAGNOSTIC
             elif k is None and not terminal:
-                # First further diagnostic cycle after j → STALLED.
                 k = rec.cycle_index
                 report.stalled_classified_at = k
                 report.classification = STALLED
                 subsequent.append(k)
             elif k is not None and not terminal:
                 subsequent.append(rec.cycle_index)
-        elif j is not None and not terminal and not is_cont:
-            # Unexpected return to non-diagnostic after j.
-            report.classification = STALL_CLEARED
-            report.stall_cleared_cycle = rec.cycle_index
-            break
+        elif j is not None and k is not None and not terminal and not is_cont:
+            # Recovery without continuity diagnostic → STALL_CLEARED
+            if report.classification == STALLED:
+                report.classification = STALL_CLEARED
+                report.stall_cleared_cycle = rec.cycle_index
 
     report.subsequent_diagnostic_cycles = subsequent
     report.subsequent_diagnostic_count = len(subsequent)
     report.blocked_cycles = blocked
-    report.engine_observed_reasons = list(dict.fromkeys(engine_reasons))
+    report.engine_observed_reasons = engine_reasons
     return report

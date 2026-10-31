@@ -99,11 +99,12 @@ def begin_acceptance_run(*, commit: str | None = None, note: str = "") -> None:
     """Stamp the current acceptance run identity into the manifest."""
     import platform
     import time
+    talib_meta: dict[str, Any] = {}
     try:
-        import talib
-        talib_ver = getattr(talib, "__version__", "unknown")
-    except Exception:
-        talib_ver = "unavailable"
+        from cpab.replay.real_talib import real_talib_info
+        talib_meta = real_talib_info()
+    except Exception as exc:
+        talib_meta = {"talib_error": str(exc)}
     clear_evidence()
     path = _manifest_path()
     data = {
@@ -114,7 +115,9 @@ def begin_acceptance_run(*, commit: str | None = None, note: str = "") -> None:
             "commit": commit or os.environ.get("GIT_COMMIT", os.environ.get("GITHUB_SHA", "unknown")),
             "platform": platform.platform(),
             "python": platform.python_version(),
-            "talib": talib_ver,
+            "talib_version": talib_meta.get("talib_version"),
+            "talib_file": talib_meta.get("talib_file"),
+            "talib_extension": talib_meta.get("talib_extension"),
             "note": note,
         },
     }

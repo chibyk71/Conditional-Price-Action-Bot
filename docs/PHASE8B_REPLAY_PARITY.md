@@ -60,3 +60,11 @@ provider-backed, or profitability evidence. F2/F3 expiry is not covered.
 
 `main.py` still instantiates only `EngulfingDetector()`. Valid-but-unwired
 types produce warnings, not rejection.
+
+## A15 acceptance runs
+
+Acceptance evidence is generated only during a **full Phase 8B / full-suite pytest session**.
+The evidence manifest is cleared at `pytest_sessionstart`. Meta-tests that require all
+mandatory A6 keys and all 24 stall rows therefore **fail closed** if run in isolation
+(empty manifest). Run `pytest tests/test_phase8b_*.py` or the full suite.
+
