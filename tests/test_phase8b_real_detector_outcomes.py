@@ -147,16 +147,36 @@ def test_a6_f1_completion_real():
     _mark("F1-completion-real", ok, transition_cycle=tc, impulse_idx=imp_idx)
 
 def test_a6_f1_invalidation_real():
-    # Expression never completes (bullish impulse absent); invalidation is the
-    # real bearish breaker produced by BreakerBlockDetector.
-    setup = SetupDef(schema_version=SCHEMA_VERSION_V1, setup_id="f1_invalidation_real", symbol=SYMBOL, timeframe=TF, enabled=True,
-        expression=ObservationRequirement(type="bullish_impulse", variant="atr_normalized_candle_v1", min_count=1),
-        invalidation=ObservationRequirement(type="breaker_block", variant="bullish_to_bearish", min_count=1))
-    candles = _ohlc(_f1_rows())
-    r = run_replay(ReplayRunConfig(setups=[setup], detectors=[BreakerBlockDetector(left_strength=1, right_strength=1), ImpulseDetector()], symbol=SYMBOL, timeframe=TF, timeframe_seconds=TF_SEC, candles=candles, arm_count=5))
+    """F1 invalidation using contract setup; INVALIDATED at cycle 129.
+
+    Constructed series (not seed 1) emits breaker_block/bearish_to_bullish.
+    """
+    setup = _f1_setup("f1_invalidation_real")
+    # bearish OB → bullish breaker (invalidation variant)
+    inv_rows = [
+        (10.0, 10.5, 9.5, 10.0),
+        (10.0, 10.2, 8.0, 9.0),
+        (9.0, 9.5, 8.5, 9.2),
+        (9.0, 10.0, 8.8, 9.8),
+        (9.8, 10.0, 9.5, 9.6),
+        (9.6, 9.7, 7.0, 7.2),
+        (7.2, 7.3, 7.0, 7.1),
+        (7.1, 10.5, 7.0, 10.2),
+    ]
+    # Pad so invalidation lands at index 129 (base event at relative 7)
+    pad = [(10.0, 10.1, 9.9, 10.0)] * 122
+    candles = _ohlc(pad + inv_rows)
+    dets = [BreakerBlockDetector(left_strength=1, right_strength=1), ImpulseDetector()]
+    bb = dets[0].detect_all_historical(candles, history_complete=True)
+    assert any(o.variant == "bearish_to_bullish" for o in bb)
+    r = run_replay(ReplayRunConfig(setups=[setup], detectors=dets, symbol=SYMBOL, timeframe=TF, timeframe_seconds=TF_SEC, candles=candles, arm_count=60))
     ok = r.final_setup_states[setup.setup_id] == LifecycleState.INVALIDATED.value and r.signals == []
     assert ok, r.final_setup_states
-    _mark("F1-invalidation-real", ok)
+    tc = r.transition_cycle(setup.setup_id, LifecycleState.INVALIDATED.value)
+    assert tc == 129, f"expected transition at 129, got {tc}"
+    _mark("F1-invalidation-real", ok, transition_cycle=tc)
+
+
 
 def test_a6_f1_expiry_real():
     """F1 expiry: contract setup with max_age_candles=80; series without impulse.

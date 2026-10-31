@@ -40,21 +40,26 @@ class ParityComparison:
         }
 
 
-def _effective_inputs(rec: CycleRecord) -> dict[str, Any]:
+def _effective_inputs(rec: CycleRecord, *, ignore_live_metadata: bool = False) -> dict[str, Any]:
     mon = rec.monitoring or {}
-    return {
+    out: dict[str, Any] = {
         "effective_candle_epochs": rec.effective_candle_epochs,
         "effective_detector_names": rec.effective_detector_names,
         "data_ok": rec.data_ok,
         "readiness_state": rec.readiness_state,
         "evaluation_blocked": rec.evaluation_blocked,
-        # Live-style extras when present (A10).
-        "confirm_lag_bars": mon.get("confirm_lag_bars"),
-        "cache_max_size": mon.get("cache_max_size"),
-        "htf_epochs": mon.get("htf_epochs"),
-        "htf_source": mon.get("htf_source"),
-        "completed_count": mon.get("completed_count"),
     }
+    if not ignore_live_metadata:
+        out.update(
+            {
+                "confirm_lag_bars": mon.get("confirm_lag_bars"),
+                "cache_max_size": mon.get("cache_max_size"),
+                "htf_epochs": mon.get("htf_epochs"),
+                "htf_source": mon.get("htf_source"),
+                "completed_count": mon.get("completed_count"),
+            }
+        )
+    return out
 
 
 def _behavior_fields(rec: CycleRecord) -> dict[str, Any]:
@@ -72,6 +77,7 @@ def compare_replay_runs(
     run_b: ReplayResult,
     *,
     setup_ids: Optional[Sequence[str]] = None,
+    ignore_live_metadata: bool = False,
 ) -> ParityComparison:
     """Compare two independent runs cycle-by-cycle.
 
@@ -96,8 +102,8 @@ def compare_replay_runs(
     for i in range(n):
         a = run_a.cycles[i]
         b = run_b.cycles[i]
-        a_in = _effective_inputs(a)
-        b_in = _effective_inputs(b)
+        a_in = _effective_inputs(a, ignore_live_metadata=ignore_live_metadata)
+        b_in = _effective_inputs(b, ignore_live_metadata=ignore_live_metadata)
         input_mismatch = False
         for key in a_in:
             if a_in[key] != b_in[key]:

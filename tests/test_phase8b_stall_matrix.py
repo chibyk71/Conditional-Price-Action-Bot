@@ -139,6 +139,26 @@ def generate_stall_scenarios() -> list[dict[str, Any]]:
     return out
 
 
+def _f1_expression() -> ThenExpression:
+    """Contract fx_bearish_breaker_then_impulse expression."""
+    return ThenExpression(
+        steps=(
+            ThenStep(
+                expression=ObservationRequirement(
+                    type="breaker_block", variant="bullish_to_bearish", min_count=1
+                )
+            ),
+            ThenStep(
+                expression=ObservationRequirement(
+                    type="bearish_impulse",
+                    variant="atr_normalized_candle_v1",
+                    min_count=1,
+                )
+            ),
+        )
+    )
+
+
 def _setup_completion() -> SetupDef:
     return SetupDef(
         schema_version=SCHEMA_VERSION_V1,
@@ -146,38 +166,29 @@ def _setup_completion() -> SetupDef:
         symbol=SYMBOL,
         timeframe=TF,
         enabled=True,
-        expression=ThenExpression(
-            steps=(
-                ThenStep(
-                    expression=ObservationRequirement(
-                        type="structure_break", variant="bos", min_count=1
-                    )
-                ),
-                ThenStep(
-                    expression=ObservationRequirement(
-                        type="zone_interaction", variant="rejection", min_count=1
-                    )
-                ),
-            )
+        expression=_f1_expression(),
+        invalidation=ObservationRequirement(
+            type="breaker_block", variant="bearish_to_bullish", min_count=1
         ),
-        name="F1 completion control",
+        expiry=ExpiryConfig(max_age_candles=80),
+        name="fx_bearish_breaker_then_impulse",
     )
 
 
 def _setup_invalidation() -> SetupDef:
+    # Same F1 setup; invalidation observation is injected instead of completion path.
     return SetupDef(
         schema_version=SCHEMA_VERSION_V1,
         setup_id="f1_invalidation_control",
         symbol=SYMBOL,
         timeframe=TF,
         enabled=True,
-        expression=ObservationRequirement(
-            type="structure_break", variant="bos", min_count=1
-        ),
+        expression=_f1_expression(),
         invalidation=ObservationRequirement(
-            type="structure_break", variant="choch", min_count=1
+            type="breaker_block", variant="bearish_to_bullish", min_count=1
         ),
-        name="F1 invalidation control",
+        expiry=ExpiryConfig(max_age_candles=80),
+        name="fx_bearish_breaker_then_impulse",
     )
 
 
@@ -188,38 +199,47 @@ def _setup_expiry() -> SetupDef:
         symbol=SYMBOL,
         timeframe=TF,
         enabled=True,
-        expression=ThenExpression(
-            steps=(
-                ThenStep(
-                    expression=ObservationRequirement(
-                        type="structure_break", variant="bos", min_count=1
-                    )
-                ),
-                ThenStep(
-                    expression=ObservationRequirement(
-                        type="zone_interaction", variant="rejection", min_count=1
-                    )
-                ),
-            )
+        expression=_f1_expression(),
+        invalidation=ObservationRequirement(
+            type="breaker_block", variant="bearish_to_bullish", min_count=1
         ),
-        expiry=ExpiryConfig(max_age_candles=1),
-        name="F1 expiry control",
+        expiry=ExpiryConfig(max_age_candles=80),
+        name="fx_bearish_breaker_then_impulse",
     )
 
 
 def _script_for_control(control: str) -> dict[int, list[Observation]]:
+    """Scripted F1 observation timing at locked contract indices.
+
+    Continuity isolation still uses ScriptedDetector; observation *types/variants*
+    match the contract F1 setup (breaker_block / bearish_impulse).
+    """
     if control == "F1-completion":
         return {
-            _epoch(92): [_obs("structure_break", _epoch(92), variant="bos")],
-            _epoch(98): [_obs("zone_interaction", _epoch(98), variant="rejection")],
+            _epoch(92): [
+                _obs("breaker_block", _epoch(92), variant="bullish_to_bearish")
+            ],
+            _epoch(98): [
+                _obs(
+                    "bearish_impulse",
+                    _epoch(98),
+                    variant="atr_normalized_candle_v1",
+                )
+            ],
         }
     if control == "F1-invalidation":
+        # Inject invalidating breaker at 129 (no completion path).
         return {
-            _epoch(129): [_obs("structure_break", _epoch(129), variant="choch")],
+            _epoch(129): [
+                _obs("breaker_block", _epoch(129), variant="bearish_to_bullish")
+            ],
         }
     if control == "F1-expiry":
+        # Breaker accepted near arming without impulse; max_age 80 → EXPIRED at 139.
         return {
-            _epoch(138): [_obs("structure_break", _epoch(138), variant="bos")],
+            _epoch(59): [
+                _obs("breaker_block", _epoch(59), variant="bullish_to_bearish")
+            ],
         }
     raise ValueError(control)
 
