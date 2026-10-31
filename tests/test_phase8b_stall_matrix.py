@@ -331,57 +331,52 @@ def test_matrix_locked_coordinates():
     assert rows[6].t == 139
 
 
-@pytest.mark.parametrize(
-    "scenario",
-    generate_stall_scenarios(),
-    ids=lambda s: f"{s['control']}_{s['state_at_s']}_{s['fault_class']}_d{s['d']}",
-)
-def test_stall_scenario_locked_window(scenario):
-    key = scenario["key"]
-    s, r, t, E = scenario["s"], scenario["r"], scenario["t"], scenario["E"]
-    d = scenario["d"]
-    fc = scenario["fault_class"]
-    control = scenario["control"]
-    n = max(E, t) + 5
 
-    setup, clean = _run(control, n=n)
+def _assert_stall_window(
+    *,
+    control: str,
+    s: int,
+    r: int,
+    t: int,
+    E: int,
+    d: int,
+    fc: str,
+    state_at_s: str,
+    setup,
+    clean,
+    setup_f,
+    faulted,
+) -> None:
+    """Reusable A12–A14 assertions shared by matrix and mutation tests (E2)."""
     clean_terminal = clean.final_setup_states.get(setup.setup_id)
-
     if control == "F1-completion":
         assert clean_terminal == LifecycleState.COMPLETED.value, clean_terminal
-        found_t = None
-        for rec in clean.cycles:
-            if (
-                rec.cycle_index == t
-                and rec.setup_states.get(setup.setup_id)
-                == LifecycleState.COMPLETED.value
-            ):
-                found_t = rec.cycle_index
-        assert found_t == t, f"clean completion expected at t={t}, got {found_t}"
+        assert any(
+            rec.cycle_index == t
+            and rec.setup_states.get(setup.setup_id) == LifecycleState.COMPLETED.value
+            for rec in clean.cycles
+        ), t
     elif control == "F1-invalidation":
         assert clean_terminal == LifecycleState.INVALIDATED.value, clean_terminal
     elif control == "F1-expiry":
         assert clean_terminal == LifecycleState.EXPIRED.value, clean_terminal
 
-    if scenario["state_at_s"] == "IN_PROGRESS":
-        state_at_s = None
+    if state_at_s == "IN_PROGRESS":
+        state_at_s_obs = None
         for rec in clean.cycles:
             if rec.cycle_index == s:
-                state_at_s = rec.setup_states.get(setup.setup_id)
+                state_at_s_obs = rec.setup_states.get(setup.setup_id)
                 break
-        assert state_at_s == LifecycleState.IN_PROGRESS.value, (
-            f"expected IN_PROGRESS at s={s}, got {state_at_s}"
+        assert state_at_s_obs == LifecycleState.IN_PROGRESS.value, (
+            f"expected IN_PROGRESS at s={s}, got {state_at_s_obs}"
         )
 
-    setup_f, faulted = _run(control, n=n, fault_schedule=_fault_schedule(s, d, fc))
-
-    # Snapshot state/anchor before fault for unchanged checks.
-    state_before_fault = None
-    anchor_before_fault = None
+    state_before = None
+    anchor_before = None
     for rec in faulted.cycles:
         if rec.cycle_index == s - 1:
-            state_before_fault = rec.setup_states.get(setup_f.setup_id)
-            anchor_before_fault = rec.setup_anchors.get(setup_f.setup_id)
+            state_before = rec.setup_states.get(setup_f.setup_id)
+            anchor_before = rec.setup_anchors.get(setup_f.setup_id)
             break
 
     if fc == "readiness_blocked":
@@ -400,7 +395,17 @@ def test_stall_scenario_locked_window(scenario):
                     f"omitted candle epoch {omit_ep} reappeared at cycle {rec.cycle_index}"
                 )
 
-    # C3: r..E — no terminal, no signal; diagnostic continuity for unhealthy/missing.
+    # Fault interval [s, r-1]: state and anchor unchanged, no signal (except readiness: zero LC).
+    if state_before is not None and fc != "readiness_blocked":
+        for rec in faulted.cycles:
+            if s <= rec.cycle_index < r:
+                st = rec.setup_states.get(setup_f.setup_id)
+                an = rec.setup_anchors.get(setup_f.setup_id)
+                assert st == state_before, (rec.cycle_index, st, state_before)
+                assert an == anchor_before, (rec.cycle_index, an, anchor_before)
+                assert not rec.signal_ids
+
+    # r..E: no terminal, no signal; diagnostic continuity for unhealthy/missing.
     for rec in faulted.cycles:
         if not (r <= rec.cycle_index <= E):
             continue
@@ -410,40 +415,20 @@ def test_stall_scenario_locked_window(scenario):
             LifecycleState.INVALIDATED.value,
             LifecycleState.EXPIRED.value,
         ):
-            pytest.fail(f"terminal {st} at cycle {rec.cycle_index} inside r..E after {fc}")
+            raise AssertionError(f"terminal {st} at cycle {rec.cycle_index} inside r..E after {fc}")
         if rec.signal_ids:
-            pytest.fail(f"signal at cycle {rec.cycle_index} inside r..E after {fc}")
+            raise AssertionError(f"signal at cycle {rec.cycle_index} inside r..E after {fc}")
         if fc in ("unhealthy", "missing_candle"):
             assert rec.setup_diagnostic_only.get(setup_f.setup_id, False), (
                 f"expected diagnostic_only at cycle {rec.cycle_index} in r..E after {fc}, state={st}"
             )
             reasons = " ".join(rec.setup_reasons.get(setup_f.setup_id, ()))
-            # Continuity reason must name expected/actual when epoch gap exists;
-            # unhealthy may remain data-not-ok until recovery then discontinuous.
             if fc == "missing_candle":
-                assert "discontinuous evaluation candle" in reasons, (
-                    f"missing continuity reason at {rec.cycle_index}: {reasons!r}"
-                )
-        if fc == "readiness_blocked" and rec.cycle_index >= r:
-            if not rec.setup_diagnostic_only.get(setup_f.setup_id, False):
-                status = "real_env_failed"
-                EVIDENCE[key] = status
-                record_stall(key, status, extra={"reason": "post_block_not_diagnostic", "cycle": rec.cycle_index})
-                pytest.fail(
-                    f"readiness_blocked real_env_failed: post-block cycle {rec.cycle_index} "
-                    "not diagnostic_only (RECOVERING lag)"
-                )
-
-    # Fault interval: lifecycle state and anchor must not advance during [s, r-1]
-    # (except readiness has zero lifecycle calls).
-    if fc != "readiness_blocked" and state_before_fault is not None:
-        for rec in faulted.cycles:
-            if s <= rec.cycle_index < r:
-                st = rec.setup_states.get(setup_f.setup_id)
-                assert st == state_before_fault or rec.setup_diagnostic_only.get(setup_f.setup_id, False), (
-                    f"state changed during fault interval at {rec.cycle_index}: "
-                    f"{state_before_fault} -> {st}"
-                )
+                assert "discontinuous evaluation candle" in reasons, reasons
+        if fc == "readiness_blocked":
+            assert rec.setup_diagnostic_only.get(setup_f.setup_id, False), (
+                f"post-block cycle {rec.cycle_index} must be diagnostic_only"
+            )
 
     report = classify_stalled(faulted, setup_f.setup_id, injected_fault_cause=fc)
     assert report.injected_fault_cause == fc
@@ -455,71 +440,88 @@ def test_stall_scenario_locked_window(scenario):
             for rec in faulted.cycles
             if rec.injected_fault == "readiness_blocked"
         ]
-        try:
-            assert injected_blocked == expected_blocked, (injected_blocked, expected_blocked)
-            assert report.blocked_cycles == expected_blocked, (
-                f"blocked_cycles expected {expected_blocked}, got {report.blocked_cycles}"
-            )
-            assert report.first_discontinuity_cycle == r, report.first_discontinuity_cycle
-            assert report.stalled_classified_at == r + 1, report.stalled_classified_at
-            for bc in report.blocked_cycles:
-                assert bc not in report.subsequent_diagnostic_cycles
-            status = "real_env_passed" if _real_talib_available() else "stub_only"
-            EVIDENCE[key] = status
-            record_stall(key, status)
-        except AssertionError as exc:
-            # D2: genuine ReadinessManager DEGRADED→RECOVERING→READY lag.
-            status = "real_env_failed"
-            EVIDENCE[key] = status
-            record_stall(
-                key,
-                status,
-                extra={
-                    "reason": "readiness_RECOVERING_extra_blocked_cycle",
-                    "blocked_cycles": list(report.blocked_cycles),
-                    "expected_blocked": expected_blocked,
-                    "error": str(exc),
-                },
-            )
-            pytest.fail(
-                "readiness_blocked: strict blocked_cycles==range(s,r) failed "
-                f"(genuine ReadinessManager lag; blocked={report.blocked_cycles})"
-            )
-    elif fc == "missing_candle":
-        # Continuity diagnostic at r (first post-fault evaluation with gap).
+        assert injected_blocked == expected_blocked, (injected_blocked, expected_blocked)
+        # HOLD: strict — no RECOVERING tolerance; readiness stays real_env_failed until R1.
+        assert report.blocked_cycles == expected_blocked, (
+            f"blocked_cycles expected {expected_blocked}, got {report.blocked_cycles}"
+        )
+        assert report.first_discontinuity_cycle == r, report.first_discontinuity_cycle
+        assert report.stalled_classified_at == r + 1, report.stalled_classified_at
+        for bc in report.blocked_cycles:
+            assert bc not in report.subsequent_diagnostic_cycles
+    elif fc in ("unhealthy", "missing_candle"):
+        assert report.blocked_cycles == []
         assert report.first_discontinuity_cycle == r, (
             f"first_discontinuity_cycle expected {r}, got {report.first_discontinuity_cycle}"
         )
         assert report.stalled_classified_at == r + 1, (
-            f"stalled_classified_at expected {r+1}, got {report.stalled_classified_at}"
+            f"stalled_classified_at expected {r + 1}, got {report.stalled_classified_at}"
         )
-        assert report.blocked_cycles == []
         assert report.first_discontinuity_expected_epoch is not None
         assert report.first_discontinuity_actual_epoch is not None
-        assert report.first_discontinuity_expected_epoch != report.first_discontinuity_actual_epoch
-    else:
-        # unhealthy: first continuity diagnostic must be at r, STALLED at r+1.
-        assert report.blocked_cycles == []
-        assert report.first_discontinuity_cycle == r, report.first_discontinuity_cycle
-        assert report.stalled_classified_at == r + 1, report.stalled_classified_at
-        assert report.first_discontinuity_expected_epoch is not None
-        assert report.first_discontinuity_actual_epoch is not None
-        assert report.first_discontinuity_expected_epoch != report.first_discontinuity_actual_epoch
+        assert (
+            report.first_discontinuity_expected_epoch
+            != report.first_discontinuity_actual_epoch
+        )
+        if report.first_discontinuity_last_accepted_epoch is not None:
+            assert (
+                report.first_discontinuity_expected_epoch
+                == report.first_discontinuity_last_accepted_epoch + TF_SEC
+            )
 
-    status = "real_env_passed" if _real_talib_available() else "stub_only"
-    EVIDENCE[key] = status
-    record_stall(key, status)
+
+@pytest.mark.parametrize(
+    "scenario",
+    generate_stall_scenarios(),
+    ids=lambda s: f"{s['control']}_{s['state_at_s']}_{s['fault_class']}_d{s['d']}",
+)
+def test_stall_scenario_locked_window(scenario):
+    key = scenario["key"]
+    s, r, t, E = scenario["s"], scenario["r"], scenario["t"], scenario["E"]
+    d = scenario["d"]
+    fc = scenario["fault_class"]
+    control = scenario["control"]
+    n = max(E, t) + 5
+
+    setup, clean = _run(control, n=n)
+    setup_f, faulted = _run(control, n=n, fault_schedule=_fault_schedule(s, d, fc))
+
+    try:
+        _assert_stall_window(
+            control=control,
+            s=s,
+            r=r,
+            t=t,
+            E=E,
+            d=d,
+            fc=fc,
+            state_at_s=scenario["state_at_s"],
+            setup=setup,
+            clean=clean,
+            setup_f=setup_f,
+            faulted=faulted,
+        )
+        status = "real_env_passed" if _real_talib_available() else "stub_only"
+        EVIDENCE[key] = status
+        record_stall(key, status)
+    except AssertionError as exc:
+        status = "real_env_failed"
+        EVIDENCE[key] = status
+        record_stall(
+            key,
+            status,
+            extra={
+                "reason": str(exc),
+                "fault_class": fc,
+            },
+        )
+        raise
 
 
 def test_acceptance_meta_requires_real_env_for_all_24():
-    """A15: durable manifest is sole authority for all 24 stall scenarios.
-
-    readiness_blocked scenarios are expected real_env_failed until contract
-    decision on ReadinessManager RECOVERING lag (D2).
-    """
+    """A15: every mandatory stall scenario must be real_env_passed. No exemptions (E1)."""
     if not _real_talib_available():
         pytest.fail("A15 meta-test: real TA-Lib is not available")
-    # Flush in-memory → manifest under stable string keys.
     for s in generate_stall_scenarios():
         key = s["key"]
         if key in EVIDENCE:
@@ -538,14 +540,10 @@ def test_acceptance_meta_requires_real_env_for_all_24():
         status = entry.get("status") if isinstance(entry, dict) else None
         if status is None:
             missing.append(key)
-            continue
-        if s["fault_class"] == "readiness_blocked":
-            if status != "real_env_failed":
-                bad.append((key, status, "expected real_env_failed"))
         elif status != "real_env_passed":
             bad.append((key, status))
     assert not missing, f"A15 stall missing from manifest: {missing}"
-    assert not bad, f"A15 stall unexpected status: {bad}"
+    assert not bad, f"A15 stall not real_env_passed: {bad}"
 
 
 def test_acceptance_meta_a6_real_detector_evidence():
@@ -560,9 +558,21 @@ def test_acceptance_meta_a6_real_detector_evidence():
     assert run.get("talib_version"), f"A15 missing talib_version: {run}"
     assert run.get("talib_file"), f"A15 missing talib_file: {run}"
     a6 = manifest.get("a6") or {}
+    required = [
+        "phase8a-completion",
+        "phase8a-invalidation",
+        "phase8a-expiry",
+        "F1-completion-real",
+        "F1-invalidation-real",
+        "F1-expiry-real",
+        "F2-completion-real",
+        "F2-invalidation-real",
+        "F3-completion-real",
+        "F3-invalidation-real",
+    ]
     missing = []
     bad = []
-    for key in A6_MANDATORY_KEYS:
+    for key in required:
         entry = a6.get(key)
         status = entry.get("status") if isinstance(entry, dict) else None
         if status is None:
@@ -574,54 +584,12 @@ def test_acceptance_meta_a6_real_detector_evidence():
 
 
 def test_f1_completion_clean_control_real_detectors():
-    """A12 control: real BreakerBlock+Impulse reach COMPLETED at locked cycle 98."""
-    from cpab.detectors.breaker_block import BreakerBlockDetector
-    from cpab.detectors.behavior_volatility import ImpulseDetector
-    from cpab.replay.driver import ReplayRunConfig, run_replay
-
-    # Same constructed series as A6 F1 completion (impulse at 98).
-    pad = [(10.0, 10.1, 9.9, 10.0)] * 70
-    base = [
-        (10.0, 10.5, 9.5, 10.0),
-        (10.0, 12.0, 9.8, 11.0),
-        (11.0, 11.2, 10.5, 10.8),
-        (11.0, 11.2, 9.8, 10.0),
-        (10.0, 10.5, 9.9, 10.2),
-        (10.2, 13.5, 10.0, 13.0),
-        (13.0, 13.2, 12.5, 12.8),
-        (12.8, 12.9, 9.0, 9.5),
-    ] + [(9.5, 9.6, 9.4, 9.5)] * 20 + [(9.5, 9.6, 5.0, 5.2)]
-    candles = []
-    for i, (o, h, l, c) in enumerate(pad + base):
-        candles.append(
-            make_candle(SYMBOL, TF, START + i * TF_SEC, o, h, l, c, is_closed=True)
-        )
-    setup = _setup_completion()
-    result = run_replay(
-        ReplayRunConfig(
-            setups=[setup],
-            detectors=[
-                BreakerBlockDetector(left_strength=1, right_strength=1),
-                ImpulseDetector(),
-            ],
-            symbol=SYMBOL,
-            timeframe=TF,
-            timeframe_seconds=TF_SEC,
-            candles=candles,
-            arm_count=ARM,
-        )
-    )
-    assert result.final_setup_states[setup.setup_id] == LifecycleState.COMPLETED.value
-    tc = result.transition_cycle(setup.setup_id, LifecycleState.COMPLETED.value)
-    assert tc == 98, tc
-    assert len(result.signals) == 1
+    setup, result = _run("F1-completion", n=110)
+    assert result.final_setup_states.get(setup.setup_id) == LifecycleState.COMPLETED.value
 
 
 def test_matrix_evidence_report_24_rows():
-    """Produce a complete 24-row matrix evidence summary from the current run.
-
-    Each row records control, state_at_s, fault_class, d, s/r/t/E and evidence status.
-    """
+    """Complete 24-row matrix evidence summary from the current run (E1: all real_env_passed)."""
     for s in generate_stall_scenarios():
         key = s["key"]
         if key in EVIDENCE:
@@ -660,53 +628,82 @@ def test_matrix_evidence_report_24_rows():
             }
         )
     assert len(rows) == 24
-    missing = []
-    for row in rows:
-        if row["status"] is None:
-            missing.append(row)
-        elif row["fault_class"] == "readiness_blocked" and row["status"] != "real_env_failed":
-            missing.append(row)
-        elif row["fault_class"] != "readiness_blocked" and row["status"] != "real_env_passed":
-            missing.append(row)
-    assert not missing, f"matrix evidence incomplete: {missing}"
+    missing = [row for row in rows if row["status"] != "real_env_passed"]
+    assert not missing, f"matrix evidence incomplete (A15 requires all real_env_passed): {missing}"
 
 
-def test_mutation_missing_candle_fails_without_diagnostic():
-    """D4: clearing diagnostic_only in r..E must fail assertions."""
+def _mutate_faulted_to_advance(faulted, setup_id: str, r: int, E: int, t: int, terminal: str) -> None:
+    """Test-only: make faulted cycles look like lifecycle advanced through the fault (E2)."""
+    for rec in faulted.cycles:
+        if r <= rec.cycle_index <= E:
+            # Clear diagnostic continuity and force terminal + signal at t.
+            rec.setup_diagnostic_only[setup_id] = False
+            rec.setup_reasons[setup_id] = ()
+            if rec.cycle_index == t:
+                object.__setattr__(
+                    rec,
+                    "setup_states",
+                    {**rec.setup_states, setup_id: terminal},
+                )
+                object.__setattr__(rec, "signal_ids", ("mutated-signal",))
+
+
+def test_mutation_missing_candle_helper_rejects_advance():
+    """E2: real helper must fail when post-fault candle is accepted and setup completes."""
     control, s, r, t, E, d = "F1-completion", 70, 71, 98, 100, 1
     setup, clean = _run(control, n=E + 5)
     setup_f, faulted = _run(control, n=E + 5, fault_schedule=_fault_schedule(s, d, "missing_candle"))
-    for rec in faulted.cycles:
-        if r <= rec.cycle_index <= E:
-            rec.setup_diagnostic_only[setup_f.setup_id] = False
-            rec.setup_reasons[setup_f.setup_id] = ()
-    # Inline the critical assertion that must fail
+    # Genuine faulted run must satisfy the helper.
+    _assert_stall_window(
+        control=control, s=s, r=r, t=t, E=E, d=d, fc="missing_candle",
+        state_at_s="PENDING", setup=setup, clean=clean, setup_f=setup_f, faulted=faulted,
+    )
+    # Mutate to simulate accepting the post-fault candle and completing.
+    _mutate_faulted_to_advance(
+        faulted, setup_f.setup_id, r, E, t, LifecycleState.COMPLETED.value
+    )
     with pytest.raises(AssertionError):
-        for rec in faulted.cycles:
-            if r <= rec.cycle_index <= E:
-                assert rec.setup_diagnostic_only.get(setup_f.setup_id, False)
+        _assert_stall_window(
+            control=control, s=s, r=r, t=t, E=E, d=d, fc="missing_candle",
+            state_at_s="PENDING", setup=setup, clean=clean, setup_f=setup_f, faulted=faulted,
+        )
 
 
-def test_mutation_unhealthy_fails_without_diagnostic():
+def test_mutation_unhealthy_helper_rejects_advance():
+    """E2: real helper must fail when unhealthy path advances to terminal."""
     control, s, r, t, E, d = "F1-completion", 70, 71, 98, 100, 1
+    setup, clean = _run(control, n=E + 5)
     setup_f, faulted = _run(control, n=E + 5, fault_schedule=_fault_schedule(s, d, "unhealthy"))
-    for rec in faulted.cycles:
-        if r <= rec.cycle_index <= E:
-            rec.setup_diagnostic_only[setup_f.setup_id] = False
+    _assert_stall_window(
+        control=control, s=s, r=r, t=t, E=E, d=d, fc="unhealthy",
+        state_at_s="PENDING", setup=setup, clean=clean, setup_f=setup_f, faulted=faulted,
+    )
+    _mutate_faulted_to_advance(
+        faulted, setup_f.setup_id, r, E, t, LifecycleState.COMPLETED.value
+    )
     with pytest.raises(AssertionError):
-        for rec in faulted.cycles:
-            if r <= rec.cycle_index <= E:
-                assert rec.setup_diagnostic_only.get(setup_f.setup_id, False)
+        _assert_stall_window(
+            control=control, s=s, r=r, t=t, E=E, d=d, fc="unhealthy",
+            state_at_s="PENDING", setup=setup, clean=clean, setup_f=setup_f, faulted=faulted,
+        )
 
 
-def test_mutation_readiness_fails_when_injected_cleared():
+def test_mutation_readiness_helper_rejects_advance():
+    """E2: real helper must fail when readiness-blocked path advances to terminal.
+
+    Under HOLD the genuine readiness run already fails the helper; mutation still
+    verifies the helper rejects a terminal state in r..E.
+    """
     control, s, r, t, E, d = "F1-completion", 70, 71, 98, 100, 1
+    setup, clean = _run(control, n=E + 5)
     setup_f, faulted = _run(control, n=E + 5, fault_schedule=_fault_schedule(s, d, "readiness_blocked"))
-    for rec in faulted.cycles:
-        if rec.cycle_index == s:
-            object.__setattr__(rec, "injected_fault", None)
-    injected_blocked = [
-        rec.cycle_index for rec in faulted.cycles if rec.injected_fault == "readiness_blocked"
-    ]
+    # Genuine readiness run fails under HOLD (RECOVERING lag) — that is expected.
+    # Mutation: force terminal in r..E; helper must still raise on that violation.
+    _mutate_faulted_to_advance(
+        faulted, setup_f.setup_id, r, E, t, LifecycleState.COMPLETED.value
+    )
     with pytest.raises(AssertionError):
-        assert injected_blocked == list(range(s, r))
+        _assert_stall_window(
+            control=control, s=s, r=r, t=t, E=E, d=d, fc="readiness_blocked",
+            state_at_s="PENDING", setup=setup, clean=clean, setup_f=setup_f, faulted=faulted,
+        )
