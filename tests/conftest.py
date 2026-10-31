@@ -58,3 +58,12 @@ def series_1m(
 @pytest.fixture
 def sample_1m() -> list[Candle]:
     return series_1m()
+
+
+def pytest_sessionstart(session):
+    """A15: Phase 8B evidence must come from this run, not a checked-in manifest."""
+    try:
+        from cpab.replay.evidence import clear_evidence
+        clear_evidence()
+    except Exception:
+        pass

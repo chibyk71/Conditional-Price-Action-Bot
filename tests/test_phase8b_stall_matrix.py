@@ -30,7 +30,7 @@ TF_SEC = 60
 START = 1_700_000_000
 ARM = 60  # first evaluation at candle index 59
 
-from cpab.replay.evidence import A6_EVIDENCE, A6_MANDATORY_KEYS, STALL_EVIDENCE as EVIDENCE, load_manifest, record_a6, record_stall
+from cpab.replay.evidence import A6_EVIDENCE, A6_MANDATORY_KEYS, STALL_EVIDENCE as EVIDENCE, clear_evidence, load_manifest, record_a6, record_stall
 
 
 def _real_talib_available() -> bool:
@@ -458,7 +458,6 @@ def test_acceptance_meta_a6_real_detector_evidence():
     """A15: durable manifest must list every mandatory A6 fixture as real_env_passed."""
     if not _real_talib_available():
         pytest.fail("A15: real TA-Lib unavailable")
-    # Flush in-memory A6 to manifest
     for key, status in list(A6_EVIDENCE.items()):
         record_a6(key, status)
     manifest = load_manifest()

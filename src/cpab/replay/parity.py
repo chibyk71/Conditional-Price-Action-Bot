@@ -52,6 +52,7 @@ def _effective_inputs(rec: CycleRecord) -> dict[str, Any]:
         "confirm_lag_bars": mon.get("confirm_lag_bars"),
         "cache_max_size": mon.get("cache_max_size"),
         "htf_epochs": mon.get("htf_epochs"),
+        "htf_source": mon.get("htf_source"),
         "completed_count": mon.get("completed_count"),
     }
 

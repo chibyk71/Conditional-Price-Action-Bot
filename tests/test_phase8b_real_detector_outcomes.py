@@ -97,6 +97,24 @@ def test_a6_phase8a_expiry():
     assert ok
     _mark("phase8a-expiry", ok)
 
+
+def _f1_setup(setup_id: str) -> SetupDef:
+    """Contract fx_bearish_breaker_then_impulse definition (shared across F1 cases)."""
+    return SetupDef(
+        schema_version=SCHEMA_VERSION_V1,
+        setup_id=setup_id,
+        symbol=SYMBOL,
+        timeframe=TF,
+        enabled=True,
+        expression=ThenExpression(steps=(
+            ThenStep(expression=ObservationRequirement(type="breaker_block", variant="bullish_to_bearish", min_count=1)),
+            ThenStep(expression=ObservationRequirement(type="bearish_impulse", variant="atr_normalized_candle_v1", min_count=1)),
+        )),
+        invalidation=ObservationRequirement(type="breaker_block", variant="bearish_to_bullish", min_count=1),
+        expiry=ExpiryConfig(max_age_candles=80),
+        name="fx_bearish_breaker_then_impulse",
+    )
+
 def _f1_rows():
     base = [(10.0,10.5,9.5,10.0),(10.0,12.0,9.8,11.0),(11.0,11.2,10.5,10.8),(11.0,11.2,9.8,10.0),(10.0,10.5,9.9,10.2),(10.2,13.5,10.0,13.0),(13.0,13.2,12.5,12.8),(12.8,12.9,9.0,9.5)]
     base += [(9.5,9.6,9.4,9.5)] * 20
@@ -104,12 +122,12 @@ def _f1_rows():
     return base
 
 def test_a6_f1_completion_real():
-    """F1 completion: real BreakerBlock + Impulse; transition at cycle 98 (padded)."""
-    setup = SetupDef(schema_version=SCHEMA_VERSION_V1, setup_id="f1_completion_real", symbol=SYMBOL, timeframe=TF, enabled=True,
-        expression=ThenExpression(steps=(
-            ThenStep(expression=ObservationRequirement(type="breaker_block", variant="bullish_to_bearish", min_count=1)),
-            ThenStep(expression=ObservationRequirement(type="bearish_impulse", variant="atr_normalized_candle_v1", min_count=1)),
-        )))
+    """F1 completion: contract fx_bearish_breaker_then_impulse; transition at cycle 98.
+
+    Series is constructed (not original generator seed 3); indices match the
+    frozen contract outcomes for real-detector verification.
+    """
+    setup = _f1_setup("f1_completion_real")
     # Pad 70 neutral bars so impulse lands at index 98 (base impulse was at 28).
     pad = [(10.0, 10.1, 9.9, 10.0)] * 70
     candles = _ohlc(pad + _f1_rows())
@@ -141,14 +159,16 @@ def test_a6_f1_invalidation_real():
     _mark("F1-invalidation-real", ok)
 
 def test_a6_f1_expiry_real():
-    setup = SetupDef(schema_version=SCHEMA_VERSION_V1, setup_id="f1_expiry_real", symbol=SYMBOL, timeframe=TF, enabled=True,
-        expression=ThenExpression(steps=(
-            ThenStep(expression=ObservationRequirement(type="breaker_block", variant="bullish_to_bearish", min_count=1)),
-            ThenStep(expression=ObservationRequirement(type="bearish_impulse", variant="atr_normalized_candle_v1", min_count=1)),
-        )),
-        expiry=ExpiryConfig(max_age_candles=1))
-    rows = [(10.0,10.5,9.5,10.0),(10.0,12.0,9.8,11.0),(11.0,11.2,10.5,10.8),(11.0,11.2,9.8,10.0),(10.0,10.5,9.9,10.2),(10.2,13.5,10.0,13.0),(13.0,13.2,12.5,12.8),(12.8,12.9,9.0,9.5)] + [(9.5,9.55,9.45,9.5)] * 10
-    r = run_replay(ReplayRunConfig(setups=[setup], detectors=[BreakerBlockDetector(left_strength=1, right_strength=1), ImpulseDetector()], symbol=SYMBOL, timeframe=TF, timeframe_seconds=TF_SEC, candles=_ohlc(rows), arm_count=5))
+    """F1 expiry: contract setup with max_age_candles=80; series without impulse.
+
+    Constructed series aligned to target EXPIRED outcome (contract seed 4 @ 139
+    is not reproduced byte-for-byte without the original generator).
+    """
+    setup = _f1_setup("f1_expiry_real")
+    # Pad so breaker arrives, then 90 quiet bars without impulse → EXPIRED under max_age 80
+    pad = [(10.0, 10.1, 9.9, 10.0)] * 50
+    rows = pad + [(10.0,10.5,9.5,10.0),(10.0,12.0,9.8,11.0),(11.0,11.2,10.5,10.8),(11.0,11.2,9.8,10.0),(10.0,10.5,9.9,10.2),(10.2,13.5,10.0,13.0),(13.0,13.2,12.5,12.8),(12.8,12.9,9.0,9.5)] + [(9.5,9.55,9.45,9.5)] * 90
+    r = run_replay(ReplayRunConfig(setups=[setup], detectors=[BreakerBlockDetector(left_strength=1, right_strength=1), ImpulseDetector()], symbol=SYMBOL, timeframe=TF, timeframe_seconds=TF_SEC, candles=_ohlc(rows), arm_count=60))
     ok = r.final_setup_states[setup.setup_id] == LifecycleState.EXPIRED.value and r.signals == []
     assert ok, r.final_setup_states
     _mark("F1-expiry-real", ok)
@@ -231,7 +251,7 @@ def test_a6_f2_invalidation_real():
     ok = r.final_setup_states[setup.setup_id] == LifecycleState.INVALIDATED.value and r.signals == []
     assert ok, r.final_setup_states
     tc = r.transition_cycle(setup.setup_id, LifecycleState.INVALIDATED.value)
-    assert tc is not None and tc >= 93, f"transition cycle {tc}"
+    assert tc == 93, f"frozen transition cycle expected 93, got {tc}"
     for c in r.cycles:
         if c.cycle_index < 93:
             assert c.setup_states.get(setup.setup_id) != LifecycleState.INVALIDATED.value

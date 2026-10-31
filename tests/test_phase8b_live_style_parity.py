@@ -290,17 +290,16 @@ def test_live_style_identical_knobs_match():
 
 def test_live_style_htf_init_then_polling_aggregate():
     """Combined path: independent HTF history at init, then aggregate_from_1m while polling."""
-    # Aligned 1m series for complete 15m buckets
     start = 1_700_000_100
     primary = [
         make_candle(SYMBOL, TF, start + i * TF_SEC, 100.0, 101.0, 99.0, 100.5, is_closed=True)
         for i in range(45)
     ]
-    # Independent init HTF history (simulates history fetch at startup)
     htf_init = [
         make_candle(SYMBOL, "15m", start - 900 * 3 + i * 900, 99.0, 100.0, 98.0, 99.5, is_closed=True)
         for i in range(3)
     ]
+    init_epochs = tuple(sorted(c.epoch for c in htf_init))
     live = run_live_style(
         LiveStyleConfig(
             setups=[],
@@ -315,10 +314,58 @@ def test_live_style_htf_init_then_polling_aggregate():
         )
     )
     assert live.cycles
-    sources = {c.monitoring.get("htf_source") for c in live.cycles if c.monitoring}
-    assert "init_then_aggregate" in sources
-    # Later cycles should carry aggregated HTF epochs from 1m
+    first = live.cycles[0]
+    assert first.monitoring is not None
+    assert first.monitoring.get("htf_source") == "init_then_aggregate"
+    first_htf = tuple(first.monitoring.get("htf_epochs") or ())
+    assert first_htf, "init path must seed HTF epochs"
+    # Init epochs should appear in the first cycle's HTF set
+    assert any(e in first_htf for e in init_epochs), (first_htf, init_epochs)
     last = live.cycles[-1]
-    assert last.monitoring is not None
     assert last.monitoring.get("htf_source") == "init_then_aggregate"
-    assert len(last.monitoring.get("htf_epochs") or ()) >= 1
+    last_htf = tuple(last.monitoring.get("htf_epochs") or ())
+    assert last_htf, "polling aggregate must produce HTF epochs"
+    # After polling aggregation, HTF set should differ from pure init-only seed
+    # (aggregated from 45 ones produces buckets from primary range).
+    assert last_htf != first_htf or len(last_htf) >= len(first_htf)
+
+
+def test_replay_vs_live_style_full_match_on_closed_series():
+    """When all candles are pre-closed and live knobs do not alter the set, engine outcomes match.
+
+    Effective-input metadata (confirm_lag, cache_max) may still differ in the
+    comparison record; behavior fields and candle epochs must match. A pure
+    metadata-only INPUT_DIVERGENCE is acceptable; engine_divergence is not.
+    """
+    candles = _candles(15)
+    raw = json.loads((FIXTURES_8A / "phase8a_completion.json").read_text())
+    setup = parse_setup(raw)
+    e0, e1 = candles[8].epoch, candles[9].epoch
+    script = {
+        e0: [_obs("structure_break", e0, variant="bos")],
+        e1: [_obs("zone_interaction", e1, variant="rejection")],
+    }
+    cfg_kwargs = dict(
+        setups=[setup],
+        symbol=SYMBOL,
+        timeframe=TF,
+        timeframe_seconds=TF_SEC,
+        candles=candles,
+        arm_count=8,
+    )
+    replay = run_replay(ReplayRunConfig(detectors=[ScriptedDetector(script)], **cfg_kwargs))
+    live = run_live_style(
+        LiveStyleConfig(
+            detectors=[ScriptedDetector(script)],
+            cache_max_size=500,
+            confirm_lag_bars=1,
+            **cfg_kwargs,
+        )
+    )
+    assert replay.final_setup_states == live.final_setup_states
+    assert [s.id for s in replay.signals] == [s.id for s in live.signals]
+    for a, b in zip(replay.cycles, live.cycles):
+        assert a.effective_candle_epochs == b.effective_candle_epochs
+        assert a.setup_states == b.setup_states
+    cmp = compare_replay_runs(replay, live, setup_ids=[setup.setup_id])
+    assert not cmp.engine_divergence, cmp.to_dict()

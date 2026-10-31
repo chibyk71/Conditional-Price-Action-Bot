@@ -35,7 +35,9 @@ A6_MANDATORY_KEYS: tuple[str, ...] = (
 _DEFAULT_MANIFEST = Path(
     os.environ.get(
         "CPAB_PHASE8B_EVIDENCE_PATH",
-        str(Path(__file__).resolve().parents[3] / "artifacts" / "phase8b_a15_evidence.json"),
+        # Default outside the repo tree so a checked-in success file cannot
+        # independently certify acceptance. Override for durable CI artifacts.
+        str(Path("/tmp") / "cpab_phase8b_a15_evidence.json"),
     )
 )
 
@@ -88,3 +90,12 @@ def load_manifest() -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {"a6": {}, "stall": {}}
+
+
+def clear_evidence() -> None:
+    """Reset in-memory and on-disk evidence for a clean acceptance run."""
+    STALL_EVIDENCE.clear()
+    A6_EVIDENCE.clear()
+    path = _manifest_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"a6": {}, "stall": {}}\n', encoding="utf-8")
