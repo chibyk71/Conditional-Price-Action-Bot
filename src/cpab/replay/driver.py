@@ -62,6 +62,7 @@ class CycleRecord:
     effective_candle_ohlcs: tuple[tuple[int, float, float, float, float, float], ...] = ()
     effective_detector_names: tuple[str, ...] = ()
     injected_fault: Optional[str] = None
+    newly_accepted_observations: tuple[tuple[str, str, Optional[str], Optional[int], Optional[int]], ...] = ()
 
 
 @dataclass
@@ -282,13 +283,18 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
         all_signals.extend(signals)
         mon: MonitoringSnapshot = engine.last_monitoring_snapshot
 
-        # Lifecycle calls: 0 when readiness blocked the whole cycle.
+        # Lifecycle calls: 0 when evaluation is blocked.
+        # D2 root cause: ReadinessManager transitions
+        # READY → DEGRADED (fault) → RECOVERING (first recovery cycle) → READY
+        # (src/cpab/market/readiness.py can_evaluate / _recompute).
+        # can_evaluate() is True only for READY, so the first post-fault recovery
+        # cycle remains evaluation_blocked under genuine engine behaviour.
         blocked = bool(mon.evaluation_blocked) if mon is not None else False
         if not readiness_ready:
             blocked = True
             lc_calls = 0
         else:
-            lc_calls = 1  # one evaluate path per series when not blocked
+            lc_calls = 0 if blocked else 1
         lifecycle_calls.append(lc_calls)
 
         latest = visible[-1] if visible else None
@@ -347,6 +353,22 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
         emitted_ids = tuple(mon.detector_emitted_observation_ids) if mon else ()
         accepted_ids = tuple(mon.newly_accepted_observation_ids) if mon else ()
         sig_ids = tuple(s.id for s in signals)
+        by_id = {o.id: o for o in store.all()}
+        accepted_obs: list[tuple[str, str, Optional[str], Optional[int], Optional[int]]] = []
+        for oid in accepted_ids:
+            obs = by_id.get(oid)
+            if obs is not None:
+                accepted_obs.append(
+                    (
+                        obs.id,
+                        obs.type,
+                        getattr(obs, "variant", None),
+                        getattr(obs, "candle_epoch", None),
+                        getattr(obs, "confirmed_at", None),
+                    )
+                )
+            else:
+                accepted_obs.append((oid, "unknown", None, None, None))
 
         rec = CycleRecord(
             cycle_index=cycle_idx,
@@ -358,6 +380,7 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
             evaluation_blocked=blocked,
             emitted_observation_ids=emitted_ids,
             newly_accepted_observation_ids=accepted_ids,
+            newly_accepted_observations=tuple(accepted_obs),
             setup_states=setup_states,
             setup_previous_states=setup_prev,
             setup_reasons=setup_reasons,

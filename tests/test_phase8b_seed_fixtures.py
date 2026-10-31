@@ -163,47 +163,42 @@ def test_a6_f2_completion_seed4():
         EngulfingDetector(),
         ImpulseDetector(),
     ]
-    ms = dets[0]
-    hist = ms.detect_all_historical(candles)
-    hl = [o for o in hist if o.variant == "hl"]
-    assert hl, "HL must emit on seed series"
-    # Prefer the frozen 75/76 HL when present among multiple swings.
-    chosen = None
-    for o in hl:
-        ei = (o.candle_epoch - START) // STEP
-        ci = (o.confirmed_at - START) // STEP
-        if ei == 75 and ci == 76:
-            chosen = o
-            break
-    if chosen is None:
-        chosen = hl[0]
-    event_idx = (chosen.candle_epoch - START) // STEP
-    conf_idx = (chosen.confirmed_at - START) // STEP
     r = _run(setup, dets, candles)
     expected_t = meta["expected_transition_idx"]
     tc = r.transition_cycle(setup.setup_id, LifecycleState.COMPLETED.value)
     terminal = r.final_setup_states.get(setup.setup_id)
+
+    hl_event_idx = hl_confirm_idx = None
+    engine_obs = []
+    for rec in r.cycles:
+        for oid, otype, variant, c_epoch, conf_at in rec.newly_accepted_observations:
+            engine_obs.append((rec.cycle_index, otype, variant, c_epoch, conf_at))
+            if otype == "market_structure" and variant == "hl" and c_epoch is not None:
+                ei = (c_epoch - START) // STEP
+                ci = (conf_at - START) // STEP if conf_at is not None else None
+                if ei == 75 and ci == 76:
+                    hl_event_idx, hl_confirm_idx = ei, ci
+                elif hl_event_idx is None:
+                    hl_event_idx, hl_confirm_idx = ei, ci
+
     observed = {
         "terminal": terminal,
         "transition_idx": tc,
-        "hl_event_idx": event_idx,
-        "hl_confirm_idx": conf_idx,
+        "hl_event_idx": hl_event_idx,
+        "hl_confirm_idx": hl_confirm_idx,
+        "engine_obs_near_t": [x for x in engine_obs if 70 <= x[0] <= 80],
     }
-    ok = (
-        terminal == meta["expected_terminal"]
-        and tc == expected_t
-        and event_idx == 75
-        and conf_idx == 76
-        and len(r.signals) == 1
-    )
-    if not ok:
-        print(f"A6 INDEX DRIFT F2-completion expected t=76 event=75/76 observed={observed}")
-    # Causal: not completed before confirmation cycle 76
-    for c in r.cycles:
-        if c.cycle_index < 76:
-            assert c.setup_states.get(setup.setup_id) != LifecycleState.COMPLETED.value
-    assert ok, observed
-    _mark("F2-completion-real", ok, **observed)
+    for rec in r.cycles:
+        if rec.cycle_index < 76:
+            assert rec.setup_states.get(setup.setup_id) != LifecycleState.COMPLETED.value
+
+    term_ok = terminal == meta["expected_terminal"] and tc == expected_t and len(r.signals) == 1
+    idx_ok = hl_event_idx == 75 and hl_confirm_idx == 76
+    assert term_ok, observed
+    if not idx_ok:
+        _mark("F2-completion-real", False, **observed, reason="frozen_swing_idx_moved")
+        pytest.fail(f"frozen HL 75/76 moved: observed {hl_event_idx}/{hl_confirm_idx}")
+    _mark("F2-completion-real", True, **observed)
 
 
 def test_a6_f2_invalidation_seed7():
@@ -215,43 +210,54 @@ def test_a6_f2_invalidation_seed7():
         EngulfingDetector(),
         ImpulseDetector(),
     ]
-    hist = dets[0].detect_all_historical(candles)
-    ll = [o for o in hist if o.variant == "ll"]
-    assert ll, "LL must emit"
-    chosen = None
-    for o in ll:
-        ei = (o.candle_epoch - START) // STEP
-        ci = (o.confirmed_at - START) // STEP
-        if ei == 92 and ci == 93:
-            chosen = o
-            break
-    if chosen is None:
-        chosen = ll[0]
-    event_idx = (chosen.candle_epoch - START) // STEP
-    conf_idx = (chosen.confirmed_at - START) // STEP
     r = _run(setup, dets, candles)
     expected_t = meta["expected_transition_idx"]
     tc = r.transition_cycle(setup.setup_id, LifecycleState.INVALIDATED.value)
     terminal = r.final_setup_states.get(setup.setup_id)
+
+    ll_event_idx = ll_confirm_idx = None
+    engine_obs = []
+    for rec in r.cycles:
+        for oid, otype, variant, c_epoch, conf_at in rec.newly_accepted_observations:
+            engine_obs.append((rec.cycle_index, otype, variant, c_epoch, conf_at))
+            if otype == "market_structure" and variant == "ll" and c_epoch is not None:
+                ei = (c_epoch - START) // STEP
+                ci = (conf_at - START) // STEP if conf_at is not None else None
+                if ei == 92 and ci == 93:
+                    ll_event_idx, ll_confirm_idx = ei, ci
+                elif ll_event_idx is None and (tc is None or rec.cycle_index <= tc):
+                    ll_event_idx, ll_confirm_idx = ei, ci
+
+    if tc is not None:
+        for rec in r.cycles:
+            if rec.cycle_index != tc:
+                continue
+            for oid, otype, variant, c_epoch, conf_at in rec.newly_accepted_observations:
+                if otype == "market_structure" and variant == "ll" and c_epoch is not None:
+                    ll_event_idx = (c_epoch - START) // STEP
+                    ll_confirm_idx = (conf_at - START) // STEP if conf_at is not None else None
+
     observed = {
         "terminal": terminal,
         "transition_idx": tc,
-        "ll_event_idx": event_idx,
-        "ll_confirm_idx": conf_idx,
+        "ll_event_idx": ll_event_idx,
+        "ll_confirm_idx": ll_confirm_idx,
+        "engine_obs_near_t": [x for x in engine_obs if 88 <= x[0] <= 95],
     }
+    for rec in r.cycles:
+        if rec.cycle_index < 93:
+            assert rec.setup_states.get(setup.setup_id) != LifecycleState.INVALIDATED.value
+
     term_ok = terminal == meta["expected_terminal"] and tc == expected_t and r.signals == []
-    idx_ok = event_idx == 92 and conf_idx == 93
-    if not idx_ok:
-        print(
-            f"A6 INDEX DRIFT F2-invalidation event/confirm expected=92/93 "
-            f"observed={event_idx}/{conf_idx} (terminal ok={term_ok}, t={tc})"
-        )
-    for c in r.cycles:
-        if c.cycle_index < 93:
-            assert c.setup_states.get(setup.setup_id) != LifecycleState.INVALIDATED.value
-    # Frozen transition index is mandatory; swing indices reported if drifted.
+    idx_ok = ll_event_idx == 92 and ll_confirm_idx == 93
     assert term_ok, observed
-    _mark("F2-invalidation-real", term_ok, **observed, swing_idx_ok=idx_ok)
+    if not idx_ok:
+        _mark("F2-invalidation-real", False, **observed, reason="frozen_swing_idx_moved")
+        pytest.fail(
+            f"frozen LL 92/93 moved or missing from engine records: "
+            f"observed {ll_event_idx}/{ll_confirm_idx}; evidence={observed}"
+        )
+    _mark("F2-invalidation-real", True, **observed)
 
 
 def test_a6_f3_completion_seed1():

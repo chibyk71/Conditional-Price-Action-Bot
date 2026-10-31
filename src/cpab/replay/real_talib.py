@@ -8,7 +8,10 @@ from typing import Any
 
 
 def real_talib_info() -> dict[str, Any]:
-    """Return TA-Lib environment details or raise if not a real compiled extension."""
+    """Return TA-Lib environment details or raise if not a real compiled extension.
+
+    Includes known-value checks for CDLENGULFING and ATR (D5).
+    """
     import talib
     import numpy as np
     from talib.abstract import Function
@@ -18,13 +21,13 @@ def real_talib_info() -> dict[str, Any]:
     if "shim" in path_str or "stub" in path_str:
         raise RuntimeError(f"TA-Lib path looks like a stub/shim: {path}")
 
-    # Compiled extension must exist as .so/.pyd/.dylib
     pkg_dir = path.parent if path.is_file() else path
-    so_candidates = list(pkg_dir.glob("_ta_lib*.so")) + list(
-        pkg_dir.glob("_ta_lib*.pyd")
-    ) + list(pkg_dir.glob("_ta_lib*.dylib"))
+    so_candidates = (
+        list(pkg_dir.glob("_ta_lib*.so"))
+        + list(pkg_dir.glob("_ta_lib*.pyd"))
+        + list(pkg_dir.glob("_ta_lib*.dylib"))
+    )
     if not so_candidates:
-        # Also accept importable _ta_lib whose __file__ is a binary
         try:
             import talib._ta_lib as ext  # type: ignore
 
@@ -32,7 +35,9 @@ def real_talib_info() -> dict[str, Any]:
             if ext_path.suffix not in {".so", ".pyd", ".dylib"} and not any(
                 s in ext_path.name for s in (".so", ".pyd", ".dylib")
             ):
-                raise RuntimeError(f"talib._ta_lib is not a compiled extension: {ext_path}")
+                raise RuntimeError(
+                    f"talib._ta_lib is not a compiled extension: {ext_path}"
+                )
             so_candidates = [ext_path]
         except Exception as exc:
             raise RuntimeError("TA-Lib compiled extension not found") from exc
@@ -45,19 +50,43 @@ def real_talib_info() -> dict[str, Any]:
     if lb < 0:
         raise RuntimeError("CDLENGULFING lookback invalid")
 
-    opens = np.array([1.0, 1.1, 1.0, 0.9, 1.2], dtype=float)
-    highs = np.array([1.2, 1.3, 1.1, 1.0, 1.3], dtype=float)
-    lows = np.array([0.9, 1.0, 0.9, 0.8, 1.0], dtype=float)
-    closes = np.array([1.1, 1.0, 0.95, 1.15, 1.25], dtype=float)
-
+    # Known-value: fixed series where CDLENGULFING returns -100 at index 2.
+    opens = np.array(
+        [96.88619958, 98.60597464, 109.32124162, 101.24463684, 95.17729186],
+        dtype=float,
+    )
+    highs = np.array(
+        [98.05844571, 108.87054742, 110.94066317, 102.36558875, 96.34345757],
+        dtype=float,
+    )
+    lows = np.array(
+        [94.0077216, 96.9697327, 93.26437564, 90.57293883, 94.43848304],
+        dtype=float,
+    )
+    closes = np.array(
+        [94.83351428, 107.76236641, 94.51738857, 92.49109412, 95.76661514],
+        dtype=float,
+    )
     eng = talib.CDLENGULFING(opens, highs, lows, closes)
     if eng is None or len(eng) != 5:
-        raise RuntimeError("CDLENGULFING failed")
+        raise RuntimeError("CDLENGULFING failed length check")
+    if int(eng[2]) != -100:
+        raise RuntimeError(
+            f"CDLENGULFING known-value failed: expected -100 at index 2, got {eng[2]!r}"
+        )
 
-    # Second project-used function path
-    atr = talib.ATR(highs, lows, closes, timeperiod=3)
-    if atr is None or len(atr) != 5:
-        raise RuntimeError("ATR failed")
+    # Known-value ATR(timeperiod=3) vs hand-computed Wilder.
+    h = np.array([12.0, 13.0, 14.0, 15.0], dtype=float)
+    l = np.array([10.0, 11.0, 12.0, 11.0], dtype=float)
+    c = np.array([11.0, 12.0, 13.0, 12.0], dtype=float)
+    atr = talib.ATR(h, l, c, timeperiod=3)
+    if atr is None or len(atr) != 4:
+        raise RuntimeError("ATR failed length check")
+    expected_atr3 = 8.0 / 3.0
+    if abs(float(atr[3]) - expected_atr3) > 1e-9:
+        raise RuntimeError(
+            f"ATR known-value failed: expected {expected_atr3}, got {atr[3]!r}"
+        )
 
     return {
         "talib_version": ver,
