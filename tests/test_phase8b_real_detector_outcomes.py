@@ -25,13 +25,37 @@ SYMBOL, TF, TF_SEC, START = "R_100", "1m", 60, 1_700_000_000
 FIXTURES_8A = Path(__file__).resolve().parent / "fixtures" / "phase8a"
 F2_START, F2_STEP = 1_699_992_000, 900
 
-def _talib_ok():
+
+def _real_talib_available() -> bool:
+    """Require a real TA-Lib C extension usable by project detectors."""
     try:
+        import talib
         from talib.abstract import Function
-        _ = int(Function("CDLENGULFING").lookback)
+        import numpy as np
+
+        ver = getattr(talib, "__version__", None)
+        if not ver:
+            return False
+        # Exercise the C path, not merely import.
+        lb = int(Function("CDLENGULFING").lookback)
+        if lb < 0:
+            return False
+        # Minimal array call through the extension.
+        opens = np.array([1.0, 1.1, 1.0, 0.9, 1.2], dtype=float)
+        highs = np.array([1.2, 1.3, 1.1, 1.0, 1.3], dtype=float)
+        lows = np.array([0.9, 1.0, 0.9, 0.8, 1.0], dtype=float)
+        closes = np.array([1.1, 1.0, 0.95, 1.15, 1.25], dtype=float)
+        out = talib.CDLENGULFING(opens, highs, lows, closes)
+        if out is None or len(out) != 5:
+            return False
         return True
     except Exception:
         return False
+
+def _talib_ok() -> bool:
+    return _real_talib_available()
+
+
 
 def _mark(fid, ok, **extra):
     status = "real_env_passed" if ok and _talib_ok() else ("stub_only" if ok else "real_env_failed")

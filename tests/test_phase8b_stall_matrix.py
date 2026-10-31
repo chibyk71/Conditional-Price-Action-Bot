@@ -36,11 +36,27 @@ from cpab.replay.evidence import A6_EVIDENCE, A6_MANDATORY_KEYS, STALL_EVIDENCE 
 
 
 def _real_talib_available() -> bool:
+    """Require a real TA-Lib C extension usable by project detectors."""
     try:
-        import talib  # noqa: F401
-        from talib.abstract import Function  # noqa: F401
+        import talib
+        from talib.abstract import Function
+        import numpy as np
 
-        _ = int(Function("CDLENGULFING").lookback)
+        ver = getattr(talib, "__version__", None)
+        if not ver:
+            return False
+        # Exercise the C path, not merely import.
+        lb = int(Function("CDLENGULFING").lookback)
+        if lb < 0:
+            return False
+        # Minimal array call through the extension.
+        opens = np.array([1.0, 1.1, 1.0, 0.9, 1.2], dtype=float)
+        highs = np.array([1.2, 1.3, 1.1, 1.0, 1.3], dtype=float)
+        lows = np.array([0.9, 1.0, 0.9, 0.8, 1.0], dtype=float)
+        closes = np.array([1.1, 1.0, 0.95, 1.15, 1.25], dtype=float)
+        out = talib.CDLENGULFING(opens, highs, lows, closes)
+        if out is None or len(out) != 5:
+            return False
         return True
     except Exception:
         return False
@@ -517,39 +533,29 @@ def test_stall_scenario_locked_window(scenario):
 
 
 def test_acceptance_meta_requires_real_env_for_all_24():
-    """A15: durable manifest must list all 24 stall scenarios as real_env_passed."""
+    """A15: durable manifest is sole authority for all 24 stall scenarios."""
     if not _real_talib_available():
         pytest.fail("A15 meta-test: real TA-Lib is not available")
-    # Ensure current-process evidence is flushed.
+    # Flush in-memory → manifest under stable string keys.
     for s in generate_stall_scenarios():
         key = s["key"]
         if key in EVIDENCE:
             record_stall(key, EVIDENCE[key])
     manifest = load_manifest()
+    run = manifest.get("run") or {}
+    assert run.get("commit"), f"A15 run identity missing: {run}"
     stall = manifest.get("stall") or {}
     missing = []
     bad = []
     for s in generate_stall_scenarios():
         key = str(s["key"])
-        entry = stall.get(key) or stall.get(repr(s["key"]))
-        # Also try memory if tuple-string mismatch
-        status = None
-        if entry:
-            status = entry.get("status") if isinstance(entry, dict) else entry
+        entry = stall.get(key)
+        status = entry.get("status") if isinstance(entry, dict) else None
         if status is None:
-            status = EVIDENCE.get(s["key"], "not_run")
-            # re-persist under str key for next load
-            if status != "not_run":
-                record_stall(s["key"], status)
-                manifest = load_manifest()
-                stall = manifest.get("stall") or {}
-                entry = stall.get(str(s["key"]))
-                status = (entry or {}).get("status", status) if isinstance(entry, dict) else status
-        if status == "not_run":
             missing.append(key)
         elif status != "real_env_passed":
             bad.append((key, status))
-    assert not missing, f"A15 stall missing from manifest/memory: {missing}"
+    assert not missing, f"A15 stall missing from manifest: {missing}"
     assert not bad, f"A15 stall non-real_env_passed: {bad}"
 
 
@@ -618,3 +624,50 @@ def test_f1_completion_clean_control_real_detectors():
     tc = result.transition_cycle(setup.setup_id, LifecycleState.COMPLETED.value)
     assert tc == 98, tc
     assert len(result.signals) == 1
+
+
+def test_matrix_evidence_report_24_rows():
+    """Produce a complete 24-row matrix evidence summary from the current run.
+
+    Each row records control, state_at_s, fault_class, d, s/r/t/E and evidence status.
+    """
+    for s in generate_stall_scenarios():
+        key = s["key"]
+        if key in EVIDENCE:
+            record_stall(
+                key,
+                EVIDENCE[key],
+                extra={
+                    "control": s["control"],
+                    "state_at_s": s["state_at_s"],
+                    "fault_class": s["fault_class"],
+                    "d": s["d"],
+                    "s": s["s"],
+                    "r": s["r"],
+                    "t": s["t"],
+                    "E": s["E"],
+                },
+            )
+    manifest = load_manifest()
+    stall = manifest.get("stall") or {}
+    rows = []
+    for s in generate_stall_scenarios():
+        key = str(s["key"])
+        entry = stall.get(key) or {}
+        rows.append(
+            {
+                "key": key,
+                "control": s["control"],
+                "state_at_s": s["state_at_s"],
+                "fault_class": s["fault_class"],
+                "d": s["d"],
+                "s": s["s"],
+                "r": s["r"],
+                "t": s["t"],
+                "E": s["E"],
+                "status": entry.get("status") if isinstance(entry, dict) else None,
+            }
+        )
+    assert len(rows) == 24
+    missing = [r for r in rows if r["status"] != "real_env_passed"]
+    assert not missing, f"matrix evidence incomplete: {missing}"

@@ -55,6 +55,7 @@ def record_a6(fixture_id: str, status: str, *, extra: dict[str, Any] | None = No
 
 def record_stall(key: tuple, status: str, *, extra: dict[str, Any] | None = None) -> None:
     STALL_EVIDENCE[key] = status
+    # Always persist under str(key) so meta-tests can load without memory.
     _persist(str(key), status, kind="stall", extra=extra)
 
 
