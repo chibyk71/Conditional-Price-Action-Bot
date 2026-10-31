@@ -475,27 +475,67 @@ def test_acceptance_meta_requires_real_env_for_all_24():
 
 
 def test_acceptance_meta_a6_real_detector_evidence():
-    """A15: durable manifest must list every mandatory A6 fixture as real_env_passed."""
+    """A15: durable manifest is sole authority for mandatory A6 fixture evidence."""
     if not _real_talib_available():
         pytest.fail("A15: real TA-Lib unavailable")
     for key, status in list(A6_EVIDENCE.items()):
         record_a6(key, status)
     manifest = load_manifest()
+    run = manifest.get("run") or {}
+    assert run.get("commit"), f"A15 run identity missing: {run}"
     a6 = manifest.get("a6") or {}
     missing = []
     bad = []
     for key in A6_MANDATORY_KEYS:
         entry = a6.get(key)
-        status = None
-        if isinstance(entry, dict):
-            status = entry.get("status")
-        elif entry is not None:
-            status = entry
+        status = entry.get("status") if isinstance(entry, dict) else None
         if status is None:
-            status = A6_EVIDENCE.get(key, "not_run")
-        if status == "not_run":
             missing.append(key)
         elif status != "real_env_passed":
             bad.append((key, status))
-    assert not missing, f"A6 evidence missing: {missing}"
+    assert not missing, f"A6 evidence missing from manifest: {missing}"
     assert not bad, f"A6 evidence not real_env_passed: {bad}"
+
+
+def test_f1_completion_clean_control_real_detectors():
+    """A12 control: real BreakerBlock+Impulse reach COMPLETED at locked cycle 98."""
+    from cpab.detectors.breaker_block import BreakerBlockDetector
+    from cpab.detectors.behavior_volatility import ImpulseDetector
+    from cpab.replay.driver import ReplayRunConfig, run_replay
+
+    # Same constructed series as A6 F1 completion (impulse at 98).
+    pad = [(10.0, 10.1, 9.9, 10.0)] * 70
+    base = [
+        (10.0, 10.5, 9.5, 10.0),
+        (10.0, 12.0, 9.8, 11.0),
+        (11.0, 11.2, 10.5, 10.8),
+        (11.0, 11.2, 9.8, 10.0),
+        (10.0, 10.5, 9.9, 10.2),
+        (10.2, 13.5, 10.0, 13.0),
+        (13.0, 13.2, 12.5, 12.8),
+        (12.8, 12.9, 9.0, 9.5),
+    ] + [(9.5, 9.6, 9.4, 9.5)] * 20 + [(9.5, 9.6, 5.0, 5.2)]
+    candles = []
+    for i, (o, h, l, c) in enumerate(pad + base):
+        candles.append(
+            make_candle(SYMBOL, TF, START + i * TF_SEC, o, h, l, c, is_closed=True)
+        )
+    setup = _setup_completion()
+    result = run_replay(
+        ReplayRunConfig(
+            setups=[setup],
+            detectors=[
+                BreakerBlockDetector(left_strength=1, right_strength=1),
+                ImpulseDetector(),
+            ],
+            symbol=SYMBOL,
+            timeframe=TF,
+            timeframe_seconds=TF_SEC,
+            candles=candles,
+            arm_count=ARM,
+        )
+    )
+    assert result.final_setup_states[setup.setup_id] == LifecycleState.COMPLETED.value
+    tc = result.transition_cycle(setup.setup_id, LifecycleState.COMPLETED.value)
+    assert tc == 98, tc
+    assert len(result.signals) == 1

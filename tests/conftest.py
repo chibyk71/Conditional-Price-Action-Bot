@@ -63,8 +63,15 @@ def sample_1m() -> list[Candle]:
 def pytest_sessionstart(session):
     """A15: Phase 8B evidence must come from this run, not a checked-in manifest.
 
-    Fail closed: if clearing fails, abort the session so a stale manifest
-    cannot certify acceptance.
+    Fail closed: if clearing/stamping fails, abort the session.
     """
-    from cpab.replay.evidence import clear_evidence
-    clear_evidence()
+    import subprocess
+    commit = "unknown"
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:
+        pass
+    from cpab.replay.evidence import begin_acceptance_run
+    begin_acceptance_run(commit=commit, note="pytest_sessionstart")

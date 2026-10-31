@@ -58,6 +58,8 @@ class CycleRecord:
     monitoring: Optional[dict[str, Any]] = None
     # Effective inputs actually visible to the engine this cycle (for parity).
     effective_candle_epochs: tuple[int, ...] = ()
+    # Engine-boundary OHLC of each effective completed candle (epoch, o, h, l, c).
+    effective_candle_ohlcs: tuple[tuple[int, float, float, float, float], ...] = ()
     effective_detector_names: tuple[str, ...] = ()
     injected_fault: Optional[str] = None
 
@@ -367,6 +369,10 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
                 "signal_count": mon.signal_count if mon else len(signals),
             },
             effective_candle_epochs=tuple(c.epoch for c in visible),
+            effective_candle_ohlcs=tuple(
+                (c.epoch, float(c.open), float(c.high), float(c.low), float(c.close))
+                for c in visible
+            ),
             effective_detector_names=detector_names,
             injected_fault=injected,
         )

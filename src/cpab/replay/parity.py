@@ -44,6 +44,7 @@ def _effective_inputs(rec: CycleRecord, *, ignore_live_metadata: bool = False) -
     mon = rec.monitoring or {}
     out: dict[str, Any] = {
         "effective_candle_epochs": rec.effective_candle_epochs,
+        "effective_candle_ohlcs": rec.effective_candle_ohlcs,
         "effective_detector_names": rec.effective_detector_names,
         "data_ok": rec.data_ok,
         "readiness_state": rec.readiness_state,

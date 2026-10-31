@@ -418,6 +418,10 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
                 "completed_count": len(completed),
             },
             effective_candle_epochs=effective_epochs,
+            effective_candle_ohlcs=tuple(
+                (c.epoch, float(c.open), float(c.high), float(c.low), float(c.close))
+                for c in completed
+            ),
             effective_detector_names=detector_names,
             injected_fault=injected,
         )

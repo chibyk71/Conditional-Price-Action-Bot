@@ -62,12 +62,11 @@ def _persist(key: str, status: str, *, kind: str, extra: dict[str, Any] | None) 
     path = _manifest_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        data: dict[str, Any] = {"a6": {}, "stall": {}}
+        data: dict[str, Any] = {"a6": {}, "stall": {}, "run": {}}
         if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                data = {"a6": {}, "stall": {}}
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise RuntimeError(f"A15 evidence manifest invalid type: {path}")
         bucket = data.setdefault(kind, {})
         entry: dict[str, Any] = {"status": status}
         if extra:
@@ -85,11 +84,41 @@ def _persist(key: str, status: str, *, kind: str, extra: dict[str, Any] | None) 
 def load_manifest() -> dict[str, Any]:
     path = _manifest_path()
     if not path.exists():
-        return {"a6": {}, "stall": {}}
+        return {"a6": {}, "stall": {}, "run": {}}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"A15 evidence manifest corrupt: {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"A15 evidence manifest invalid type: {path}")
+    return data
+
+
+def begin_acceptance_run(*, commit: str | None = None, note: str = "") -> None:
+    """Stamp the current acceptance run identity into the manifest."""
+    import platform
+    import time
+    try:
+        import talib
+        talib_ver = getattr(talib, "__version__", "unknown")
     except Exception:
-        return {"a6": {}, "stall": {}}
+        talib_ver = "unavailable"
+    clear_evidence()
+    path = _manifest_path()
+    data = {
+        "a6": {},
+        "stall": {},
+        "run": {
+            "started_at": time.time(),
+            "commit": commit or os.environ.get("GIT_COMMIT", os.environ.get("GITHUB_SHA", "unknown")),
+            "platform": platform.platform(),
+            "python": platform.python_version(),
+            "talib": talib_ver,
+            "note": note,
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def clear_evidence() -> None:
