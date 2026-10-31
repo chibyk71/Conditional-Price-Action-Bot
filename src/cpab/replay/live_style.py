@@ -121,15 +121,20 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
     )
     htf_cache: Optional[CandleCache] = None
     htf_candles: list[Candle] = []
-    if config.htf_from_1m is not None:
+    htf_init_seeded = False
+    if config.htf is not None:
+        # Initialization path: independent HTF history feed.
+        htf_sym, htf_tf, htf_gran, htf_series = config.htf
+        htf_cache = CandleCache(htf_sym, htf_tf, htf_gran, max_size=config.cache_max_size)
+        htf_candles = list(htf_series)
+    elif config.htf_from_1m is not None:
         htf_tf, htf_gran = config.htf_from_1m
         htf_cache = CandleCache(
             config.symbol, htf_tf, htf_gran, max_size=config.cache_max_size
         )
-    elif config.htf is not None:
-        htf_sym, htf_tf, htf_gran, htf_series = config.htf
-        htf_cache = CandleCache(htf_sym, htf_tf, htf_gran, max_size=config.cache_max_size)
-        htf_candles = list(htf_series)
+    if config.htf is not None and config.htf_from_1m is not None:
+        # Combined path: keep explicit series for init seed, then poll via aggregate.
+        pass
 
     market = _CacheBackedMarket(
         primary, series_healthy=config.series_healthy, htf=htf_cache
@@ -212,9 +217,47 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
         for c in marked:
             primary.upsert(c)
 
+        htf_source_label: Optional[str] = None
         if htf_cache is not None:
-            if config.htf_from_1m is not None:
-                # Production path: aggregate HTF from completed 1m bars.
+            use_aggregate = config.htf_from_1m is not None
+            use_explicit = bool(htf_candles)
+            # Combined: seed once from explicit init history, then aggregate from 1m.
+            if use_explicit and use_aggregate:
+                if not htf_init_seeded:
+                    htf_window = [c for c in htf_candles if c.epoch <= latest_src.epoch]
+                    htf_server = (
+                        latest_src.epoch
+                        + htf_cache.granularity
+                        + config.confirm_lag_bars * htf_cache.granularity
+                    )
+                    htf_marked = mark_closed_by_lag(
+                        htf_window,
+                        htf_cache.granularity,
+                        htf_server,
+                        config.confirm_lag_bars,
+                    )
+                    htf_cache.clear()
+                    for c in htf_marked:
+                        htf_cache.upsert(c)
+                    htf_init_seeded = True
+                    htf_source_label = "init_then_aggregate"
+                else:
+                    htf_tf, htf_gran = config.htf_from_1m
+                    completed_1m = primary.completed()
+                    aggregated = aggregate_from_1m(
+                        completed_1m,
+                        htf_gran,
+                        htf_tf,
+                        config.symbol,
+                        require_complete=True,
+                    )
+                    # Upsert aggregated without wiping init history epochs that
+                    # are still valid; clear+rebuild from aggregate for polling.
+                    htf_cache.clear()
+                    for c in aggregated:
+                        htf_cache.upsert(c)
+                    htf_source_label = "init_then_aggregate"
+            elif use_aggregate:
                 htf_tf, htf_gran = config.htf_from_1m
                 completed_1m = primary.completed()
                 aggregated = aggregate_from_1m(
@@ -227,8 +270,8 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
                 htf_cache.clear()
                 for c in aggregated:
                     htf_cache.upsert(c)
-            elif htf_candles:
-                # Explicit HTF series path (initialization-style feed).
+                htf_source_label = "aggregate_from_1m"
+            elif use_explicit:
                 htf_window = [c for c in htf_candles if c.epoch <= latest_src.epoch]
                 htf_server = (
                     latest_src.epoch
@@ -244,6 +287,11 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
                 htf_cache.clear()
                 for c in htf_marked:
                     htf_cache.upsert(c)
+                htf_source_label = "explicit_series"
+            else:
+                htf_source_label = None
+        else:
+            htf_source_label = None
 
         market.set_healthy(series_ok)
 
@@ -366,10 +414,7 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
                 "cache_max_size": config.cache_max_size,
                 "confirm_lag_bars": config.confirm_lag_bars,
                 "htf_epochs": htf_epochs,
-                "htf_source": (
-                    "aggregate_from_1m" if config.htf_from_1m else
-                    ("explicit_series" if config.htf else None)
-                ),
+                "htf_source": htf_source_label,
                 "completed_count": len(completed),
             },
             effective_candle_epochs=effective_epochs,

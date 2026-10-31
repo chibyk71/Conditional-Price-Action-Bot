@@ -30,7 +30,7 @@ TF_SEC = 60
 START = 1_700_000_000
 ARM = 60  # first evaluation at candle index 59
 
-from cpab.replay.evidence import A6_EVIDENCE, A6_MANDATORY_KEYS, STALL_EVIDENCE as EVIDENCE, load_manifest, record_stall
+from cpab.replay.evidence import A6_EVIDENCE, A6_MANDATORY_KEYS, STALL_EVIDENCE as EVIDENCE, load_manifest, record_a6, record_stall
 
 
 def _real_talib_available() -> bool:
@@ -394,6 +394,15 @@ def test_stall_scenario_locked_window(scenario):
                         f"expected diagnostic_only at cycle {rec.cycle_index} "
                         f"in r..E after {fc}, state={st}"
                     )
+                elif scenario["state_at_s"] == "IN_PROGRESS":
+                    # Active instance that reports PENDING in r..E after a
+                    # continuity fault is a continuity failure unless diagnostic.
+                    assert rec.setup_diagnostic_only.get(setup_f.setup_id, False) or (
+                        state_before_fault == LifecycleState.PENDING.value
+                    ), (
+                        f"IN_PROGRESS control at cycle {rec.cycle_index} in r..E "
+                        f"after {fc} must be diagnostic_only (got PENDING without diagnostic)"
+                    )
 
     report = classify_stalled(faulted, setup_f.setup_id, injected_fault_cause=fc)
     assert report.injected_fault_cause == fc
@@ -409,57 +418,65 @@ def test_stall_scenario_locked_window(scenario):
 
 
 def test_acceptance_meta_requires_real_env_for_all_24():
-    scenarios = generate_stall_scenarios()
-    # Prefer in-memory; fall back to durable manifest for order-independent runs.
-    evidence = dict(EVIDENCE)
-    if len(evidence) < 24:
-        manifest = load_manifest()
-        for k, entry in (manifest.get("stall") or {}).items():
-            if k not in {str(x) for x in evidence}:
-                # cannot reconstruct tuple keys reliably from str; use memory first
-                pass
-        evidence = dict(EVIDENCE)
-    if not evidence:
-        pytest.fail(
-            "A15 meta-test: no scenario evidence recorded; "
-            "run the full Phase 8B suite so stall scenarios populate evidence"
-        )
+    """A15: durable manifest must list all 24 stall scenarios as real_env_passed."""
     if not _real_talib_available():
-        pytest.fail(
-            "A15 meta-test: real TA-Lib is not available; "
-            "cannot assign real_env_passed"
-        )
+        pytest.fail("A15 meta-test: real TA-Lib is not available")
+    # Ensure current-process evidence is flushed.
+    for s in generate_stall_scenarios():
+        key = s["key"]
+        if key in EVIDENCE:
+            record_stall(key, EVIDENCE[key])
+    manifest = load_manifest()
+    stall = manifest.get("stall") or {}
     missing = []
     bad = []
-    for s in scenarios:
-        key = s["key"]
-        status = evidence.get(key, "not_run")
+    for s in generate_stall_scenarios():
+        key = str(s["key"])
+        entry = stall.get(key) or stall.get(repr(s["key"]))
+        # Also try memory if tuple-string mismatch
+        status = None
+        if entry:
+            status = entry.get("status") if isinstance(entry, dict) else entry
+        if status is None:
+            status = EVIDENCE.get(s["key"], "not_run")
+            # re-persist under str key for next load
+            if status != "not_run":
+                record_stall(s["key"], status)
+                manifest = load_manifest()
+                stall = manifest.get("stall") or {}
+                entry = stall.get(str(s["key"]))
+                status = (entry or {}).get("status", status) if isinstance(entry, dict) else status
         if status == "not_run":
             missing.append(key)
         elif status != "real_env_passed":
             bad.append((key, status))
-    assert not missing, f"missing evidence: {missing}"
-    assert not bad, f"non-real_env_passed: {bad}"
-    assert len(evidence) >= 24
-
+    assert not missing, f"A15 stall missing from manifest/memory: {missing}"
+    assert not bad, f"A15 stall non-real_env_passed: {bad}"
 
 
 def test_acceptance_meta_a6_real_detector_evidence():
-    """A15: mandatory real-detector A6 fixtures must have real_env_passed."""
+    """A15: durable manifest must list every mandatory A6 fixture as real_env_passed."""
     if not _real_talib_available():
         pytest.fail("A15: real TA-Lib unavailable")
+    # Flush in-memory A6 to manifest
+    for key, status in list(A6_EVIDENCE.items()):
+        record_a6(key, status)
+    manifest = load_manifest()
+    a6 = manifest.get("a6") or {}
     missing = []
     bad = []
     for key in A6_MANDATORY_KEYS:
-        status = A6_EVIDENCE.get(key, "not_run")
+        entry = a6.get(key)
+        status = None
+        if isinstance(entry, dict):
+            status = entry.get("status")
+        elif entry is not None:
+            status = entry
+        if status is None:
+            status = A6_EVIDENCE.get(key, "not_run")
         if status == "not_run":
             missing.append(key)
         elif status != "real_env_passed":
             bad.append((key, status))
-    if missing and not A6_EVIDENCE:
-        pytest.fail(
-            "A15 A6 meta-test: A6_EVIDENCE empty — run "
-            "tests/test_phase8b_real_detector_outcomes.py in the same session first"
-        )
     assert not missing, f"A6 evidence missing: {missing}"
     assert not bad, f"A6 evidence not real_env_passed: {bad}"

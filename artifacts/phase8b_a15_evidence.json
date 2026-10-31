@@ -1,10 +1,6 @@
 {
   "a6": {
     "F1-completion-real": {
-      "extra": {
-        "impulse_idx": 98,
-        "transition_cycle": 98
-      },
       "status": "real_env_passed"
     },
     "F1-expiry-real": {
@@ -14,19 +10,9 @@
       "status": "real_env_passed"
     },
     "F2-completion-real": {
-      "extra": {
-        "confirm_idx": 76,
-        "event_idx": 75,
-        "transition_cycle": 79
-      },
       "status": "real_env_passed"
     },
     "F2-invalidation-real": {
-      "extra": {
-        "confirm_idx": 93,
-        "event_idx": 92,
-        "transition_cycle": 93
-      },
       "status": "real_env_passed"
     },
     "F3-completion-real": {

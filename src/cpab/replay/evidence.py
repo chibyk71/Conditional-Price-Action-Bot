@@ -75,10 +75,9 @@ def _persist(key: str, status: str, *, kind: str, extra: dict[str, Any] | None) 
         data["a6_memory"] = dict(A6_EVIDENCE)
         data["stall_memory"] = {str(k): v for k, v in STALL_EVIDENCE.items()}
         path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    except Exception:
-        # Persistence must not break tests; in-memory remains authoritative for
-        # same-process meta-tests.
-        pass
+    except Exception as exc:
+        # Surface persistence failures so A15 cannot silently degrade.
+        raise RuntimeError(f"A15 evidence manifest write failed: {path}: {exc}") from exc
 
 
 def load_manifest() -> dict[str, Any]:

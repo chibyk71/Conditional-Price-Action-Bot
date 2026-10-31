@@ -286,3 +286,39 @@ def test_live_style_identical_knobs_match():
     assert cmp.matching, cmp.to_dict()
     assert not cmp.input_divergence
     assert not cmp.engine_divergence
+
+
+def test_live_style_htf_init_then_polling_aggregate():
+    """Combined path: independent HTF history at init, then aggregate_from_1m while polling."""
+    # Aligned 1m series for complete 15m buckets
+    start = 1_700_000_100
+    primary = [
+        make_candle(SYMBOL, TF, start + i * TF_SEC, 100.0, 101.0, 99.0, 100.5, is_closed=True)
+        for i in range(45)
+    ]
+    # Independent init HTF history (simulates history fetch at startup)
+    htf_init = [
+        make_candle(SYMBOL, "15m", start - 900 * 3 + i * 900, 99.0, 100.0, 98.0, 99.5, is_closed=True)
+        for i in range(3)
+    ]
+    live = run_live_style(
+        LiveStyleConfig(
+            setups=[],
+            detectors=[EngulfingDetector()],
+            symbol=SYMBOL,
+            timeframe=TF,
+            timeframe_seconds=TF_SEC,
+            candles=primary,
+            arm_count=5,
+            htf=(SYMBOL, "15m", 900, htf_init),
+            htf_from_1m=("15m", 900),
+        )
+    )
+    assert live.cycles
+    sources = {c.monitoring.get("htf_source") for c in live.cycles if c.monitoring}
+    assert "init_then_aggregate" in sources
+    # Later cycles should carry aggregated HTF epochs from 1m
+    last = live.cycles[-1]
+    assert last.monitoring is not None
+    assert last.monitoring.get("htf_source") == "init_then_aggregate"
+    assert len(last.monitoring.get("htf_epochs") or ()) >= 1

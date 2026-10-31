@@ -168,17 +168,10 @@ def test_a6_f2_completion_real():
     core_h = [12.0, 11.0, 12.5, 12.0, 13.0, 12.5]
     core_l = [10.0, 8.0, 9.0, 8.5, 9.5, 9.0]
     candles = _ms(pad_h + core_h, pad_l + core_l)
-    # Engulfing at confirmation index 76 (and a bearish predecessor at 75)
-    # After pad+core length = 78; indices 0..77. HL conf at 76.
-    # Ensure engulfing is visible by confirmation cycle: place at idx 76.
-    ep75 = F2_START + 75 * F2_STEP
-    # Replace/add engulfing bars near 75-76 without breaking HL geometry:
-    # append after series so eng fires on later bars; AND allows HL already confirmed.
-    ep = F2_START + 78 * F2_STEP
-    candles += [
-        _c(ep, 10.0, 10.2, 9.0, 9.2, timeframe="15m"),
-        _c(ep + F2_STEP, 9.1, 10.5, 9.0, 10.3, timeframe="15m"),
-    ]
+    # Place bullish engulfing at indices 68-69 so it is already accepted
+    # before HL confirms at 76 → COMPLETED transition at exactly 76.
+    candles[68] = _c(F2_START + 68 * F2_STEP, 10.0, 10.2, 9.0, 9.2, timeframe="15m")
+    candles[69] = _c(F2_START + 69 * F2_STEP, 9.1, 10.5, 9.0, 10.3, timeframe="15m")
     ms = MarketStructureDetector(left_strength=1, right_strength=1, tie_policy="strict")
     eng = EngulfingDetector()
     hist = ms.detect_all_historical(candles)
@@ -189,7 +182,8 @@ def test_a6_f2_completion_real():
     conf_idx = (hl0.confirmed_at - F2_START) // F2_STEP
     assert event_idx == 75, f"frozen event idx expected 75, got {event_idx}"
     assert conf_idx == 76, f"frozen confirm idx expected 76, got {conf_idx}"
-    assert any(o.type == "bullish_engulfing" for o in eng.detect(candles))
+    eng_obs = eng.detect(candles[:70])
+    assert any(o.type == "bullish_engulfing" for o in eng_obs), "engulfing must emit by idx 69"
     setup = SetupDef(schema_version=SCHEMA_VERSION_V1, setup_id="f2_completion_real", symbol=SYMBOL, timeframe="15m", enabled=True,
         expression=AndExpression(children=(
             ObservationRequirement(type="market_structure", variant="hl", min_count=1),
@@ -209,7 +203,7 @@ def test_a6_f2_completion_real():
         if c.cycle_index < 76:
             assert c.setup_states.get(setup.setup_id) != LifecycleState.COMPLETED.value
     tc = r.transition_cycle(setup.setup_id, LifecycleState.COMPLETED.value)
-    assert tc is not None and tc >= 76, f"transition cycle {tc}"
+    assert tc == 76, f"frozen transition cycle expected 76, got {tc}"
     r2 = run_replay(ReplayRunConfig(setups=[setup], detectors=[MarketStructureDetector(left_strength=1, right_strength=1, tie_policy="strict"), EngulfingDetector()], symbol=SYMBOL, timeframe="15m", timeframe_seconds=F2_STEP, candles=candles, arm_count=60))
     assert r.signals[0].id == r2.signals[0].id
     _mark("F2-completion-real", ok, event_idx=75, confirm_idx=76, transition_cycle=tc)
