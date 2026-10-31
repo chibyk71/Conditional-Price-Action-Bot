@@ -58,3 +58,20 @@ def series_1m(
 @pytest.fixture
 def sample_1m() -> list[Candle]:
     return series_1m()
+
+
+def pytest_sessionstart(session):
+    """A15: Phase 8B evidence must come from this run, not a checked-in manifest.
+
+    Fail closed: if clearing/stamping fails, abort the session.
+    """
+    import subprocess
+    commit = "unknown"
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:
+        pass
+    from cpab.replay.evidence import begin_acceptance_run
+    begin_acceptance_run(commit=commit, note="pytest_sessionstart")
