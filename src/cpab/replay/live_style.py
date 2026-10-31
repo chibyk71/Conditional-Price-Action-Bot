@@ -413,13 +413,21 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
                 "signal_count": mon.signal_count if mon else len(signals),
                 "cache_max_size": config.cache_max_size,
                 "confirm_lag_bars": config.confirm_lag_bars,
+                "htf_ohlcs": (
+                    tuple(
+                        (c.epoch, float(c.open), float(c.high), float(c.low), float(c.close),
+                         1.0 if c.is_closed else 0.0)
+                        for c in (htf_cache.completed() if htf_cache is not None else ())
+                    )
+                ),
                 "htf_epochs": htf_epochs,
                 "htf_source": htf_source_label,
                 "completed_count": len(completed),
             },
             effective_candle_epochs=effective_epochs,
             effective_candle_ohlcs=tuple(
-                (c.epoch, float(c.open), float(c.high), float(c.low), float(c.close))
+                (c.epoch, float(c.open), float(c.high), float(c.low), float(c.close),
+                 1.0 if c.is_closed else 0.0)
                 for c in completed
             ),
             effective_detector_names=detector_names,

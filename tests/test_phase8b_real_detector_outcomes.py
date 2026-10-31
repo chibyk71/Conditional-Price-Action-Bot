@@ -13,6 +13,7 @@ from cpab.detectors.base import PriceActionDetector
 from cpab.detectors.behavior_volatility import ImpulseDetector
 from cpab.detectors.breaker_block import BreakerBlockDetector
 from cpab.detectors.engulfing import EngulfingDetector
+from cpab.detectors.zone_polarity_flip import ZonePolarityFlipDetector
 from cpab.detectors.market_structure import MarketStructureDetector
 from cpab.models import Candle, Observation
 from cpab.replay.driver import ReplayRunConfig, run_replay
@@ -278,28 +279,94 @@ def test_a6_f2_invalidation_real():
     _mark("F2-invalidation-real", ok, event_idx=92, confirm_idx=93, transition_cycle=tc)
 
 def test_a6_f3_completion_real():
-    setup = SetupDef(schema_version=SCHEMA_VERSION_V1, setup_id="f3_completion_real", symbol=SYMBOL, timeframe=TF, enabled=True,
-        expression=ObservationRequirement(type="bullish_engulfing", min_count=1))
-    prefix = [make_candle(SYMBOL, TF, START + i * TF_SEC, 100.0, 100.2, 99.8, 100.0, is_closed=True) for i in range(30)]
-    ep = START + 30 * TF_SEC
-    candles = prefix + [make_candle(SYMBOL, TF, ep, 10.0, 10.2, 9.0, 9.2, is_closed=True), make_candle(SYMBOL, TF, ep+TF_SEC, 9.1, 10.5, 9.0, 10.3, is_closed=True)]
-    det = EngulfingDetector()
-    assert any(o.type == "bullish_engulfing" for o in det.detect(candles))
-    r = run_replay(ReplayRunConfig(setups=[setup], detectors=[det], symbol=SYMBOL, timeframe=TF, timeframe_seconds=TF_SEC, candles=candles, arm_count=20))
+    """F3 completion: contract fx_bearish_flip_then_engulfing; transition at 98.
+
+    Uses real ZonePolarityFlipDetector + EngulfingDetector. Series is constructed
+    (not original seed 1); transition index matches frozen contract outcome.
+    """
+    F2_START_L, STEP = 1_700_000_000, 900
+    def _series(rows, start=F2_START_L):
+        out = []
+        for i, (o, h, l, c) in enumerate(rows):
+            out.append(_c(start + i * STEP, o, h, l, c, timeframe="15m"))
+        return out
+    pad = [(101.0, 101.2, 100.8, 101.0)] * 93
+    base = [
+        (101.0, 102.0, 100.5, 101.0),
+        (101.0, 101.5, 100.0, 100.5),
+        (100.5, 101.0, 100.2, 100.8),
+    ]
+    break_bar = [(100.5, 101.0, 98.5, 99.0)]
+    eng_rows = [(99.0, 99.5, 98.8, 99.2), (99.3, 99.4, 97.5, 97.8)]
+    candles = _series(pad + base + break_bar + eng_rows)
+    dets = [ZonePolarityFlipDetector(), EngulfingDetector()]
+    flips = dets[0].detect_all_historical(candles)
+    assert any(f.variant == "support_to_resistance" for f in flips)
+    setup = SetupDef(
+        schema_version=SCHEMA_VERSION_V1,
+        setup_id="f3_completion_real",
+        symbol=SYMBOL,
+        timeframe="15m",
+        enabled=True,
+        expression=ThenExpression(steps=(
+            ThenStep(expression=ObservationRequirement(type="zone_polarity_flip", variant="support_to_resistance", min_count=1)),
+            ThenStep(expression=ObservationRequirement(type="bearish_engulfing", min_count=1), allow_same_candle=True),
+        )),
+        invalidation=ObservationRequirement(type="zone_polarity_flip", variant="resistance_to_support", min_count=1),
+        expiry=ExpiryConfig(max_age_candles=40),
+        name="fx_bearish_flip_then_engulfing",
+    )
+    r = run_replay(ReplayRunConfig(setups=[setup], detectors=dets, symbol=SYMBOL, timeframe="15m", timeframe_seconds=STEP, candles=candles, arm_count=60))
     ok = r.final_setup_states[setup.setup_id] == LifecycleState.COMPLETED.value and len(r.signals) == 1
-    assert ok and r.transition_cycle(setup.setup_id, LifecycleState.COMPLETED.value) is not None
-    live = run_live_style(LiveStyleConfig(setups=[setup], detectors=[EngulfingDetector()], symbol=SYMBOL, timeframe=TF, timeframe_seconds=TF_SEC, candles=candles, arm_count=20))
-    assert live.final_setup_states[setup.setup_id] == LifecycleState.COMPLETED.value
-    _mark("F3-completion-real", ok)
+    assert ok, r.final_setup_states
+    tc = r.transition_cycle(setup.setup_id, LifecycleState.COMPLETED.value)
+    assert tc == 98, f"expected 98, got {tc}"
+    r2 = run_replay(ReplayRunConfig(setups=[setup], detectors=[ZonePolarityFlipDetector(), EngulfingDetector()], symbol=SYMBOL, timeframe="15m", timeframe_seconds=STEP, candles=candles, arm_count=60))
+    assert r.signals[0].id == r2.signals[0].id
+    _mark("F3-completion-real", ok, transition_cycle=tc)
+
 
 def test_a6_f3_invalidation_real():
-    setup = SetupDef(schema_version=SCHEMA_VERSION_V1, setup_id="f3_invalidation_real", symbol=SYMBOL, timeframe=TF, enabled=True,
-        expression=ObservationRequirement(type="bearish_engulfing", min_count=1),
-        invalidation=ObservationRequirement(type="bullish_engulfing", min_count=1))
-    prefix = [make_candle(SYMBOL, TF, START + i * TF_SEC, 100.0, 100.2, 99.8, 100.0, is_closed=True) for i in range(20)]
-    ep = START + 20 * TF_SEC
-    candles = prefix + [make_candle(SYMBOL, TF, ep, 10.0, 10.2, 9.0, 9.2, is_closed=True), make_candle(SYMBOL, TF, ep+TF_SEC, 9.1, 10.5, 9.0, 10.3, is_closed=True)]
-    r = run_replay(ReplayRunConfig(setups=[setup], detectors=[EngulfingDetector()], symbol=SYMBOL, timeframe=TF, timeframe_seconds=TF_SEC, candles=candles, arm_count=15))
+    """F3 invalidation: contract setup; resistance_to_support at cycle 79.
+
+    Constructed series (not seed 23).
+    """
+    F2_START_L, STEP = 1_700_000_000, 900
+    def _series(rows, start=F2_START_L):
+        out = []
+        for i, (o, h, l, c) in enumerate(rows):
+            out.append(_c(start + i * STEP, o, h, l, c, timeframe="15m"))
+        return out
+    pad = [(108.0, 108.5, 107.8, 108.2)] * 76
+    base = [
+        (108.0, 109.0, 107.5, 108.5),
+        (108.5, 110.0, 108.0, 109.0),
+        (109.0, 109.5, 108.5, 109.0),
+    ]
+    break_bar = [(109.5, 111.0, 109.0, 110.5)]
+    candles = _series(pad + base + break_bar)
+    dets = [ZonePolarityFlipDetector(), EngulfingDetector()]
+    flips = dets[0].detect_all_historical(candles)
+    assert any(f.variant == "resistance_to_support" for f in flips)
+    setup = SetupDef(
+        schema_version=SCHEMA_VERSION_V1,
+        setup_id="f3_invalidation_real",
+        symbol=SYMBOL,
+        timeframe="15m",
+        enabled=True,
+        expression=ThenExpression(steps=(
+            ThenStep(expression=ObservationRequirement(type="zone_polarity_flip", variant="support_to_resistance", min_count=1)),
+            ThenStep(expression=ObservationRequirement(type="bearish_engulfing", min_count=1), allow_same_candle=True),
+        )),
+        invalidation=ObservationRequirement(type="zone_polarity_flip", variant="resistance_to_support", min_count=1),
+        expiry=ExpiryConfig(max_age_candles=40),
+        name="fx_bearish_flip_then_engulfing",
+    )
+    r = run_replay(ReplayRunConfig(setups=[setup], detectors=dets, symbol=SYMBOL, timeframe="15m", timeframe_seconds=STEP, candles=candles, arm_count=60))
     ok = r.final_setup_states[setup.setup_id] == LifecycleState.INVALIDATED.value and r.signals == []
     assert ok, r.final_setup_states
-    _mark("F3-invalidation-real", ok)
+    tc = r.transition_cycle(setup.setup_id, LifecycleState.INVALIDATED.value)
+    assert tc == 79, f"expected 79, got {tc}"
+    _mark("F3-invalidation-real", ok, transition_cycle=tc)
+
+

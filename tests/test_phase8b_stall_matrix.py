@@ -23,6 +23,8 @@ from cpab.models import Observation
 from cpab.replay.driver import ReplayRunConfig, run_replay
 from cpab.replay.stalled import classify_stalled
 from conftest import make_candle
+from cpab.detectors.breaker_block import BreakerBlockDetector
+from cpab.detectors.behavior_volatility import ImpulseDetector
 
 SYMBOL = "R_100"
 TF = "1m"
@@ -264,14 +266,91 @@ def _fault_schedule(s: int, d: int, fault_class: str) -> dict[int, dict]:
     return sched
 
 
+def _f1_completion_series(n: int) -> list:
+    """Real-detector F1 completion series: impulse at index 98."""
+    pad = [(10.0, 10.1, 9.9, 10.0)] * 70
+    base = [
+        (10.0, 10.5, 9.5, 10.0),
+        (10.0, 12.0, 9.8, 11.0),
+        (11.0, 11.2, 10.5, 10.8),
+        (11.0, 11.2, 9.8, 10.0),
+        (10.0, 10.5, 9.9, 10.2),
+        (10.2, 13.5, 10.0, 13.0),
+        (13.0, 13.2, 12.5, 12.8),
+        (12.8, 12.9, 9.0, 9.5),
+    ] + [(9.5, 9.6, 9.4, 9.5)] * 20 + [(9.5, 9.6, 5.0, 5.2)]
+    rows = pad + base
+    # Extend with quiet bars to length n
+    while len(rows) < n:
+        rows.append((9.5, 9.55, 9.45, 9.5))
+    rows = rows[:n]
+    return [
+        make_candle(SYMBOL, TF, START + i * TF_SEC, o, h, l, c, is_closed=True)
+        for i, (o, h, l, c) in enumerate(rows)
+    ]
+
+
+def _f1_invalidation_series(n: int) -> list:
+    """Real-detector F1 invalidation: bearish_to_bullish at index 129."""
+    inv_rows = [
+        (10.0, 10.5, 9.5, 10.0),
+        (10.0, 10.2, 8.0, 9.0),
+        (9.0, 9.5, 8.5, 9.2),
+        (9.0, 10.0, 8.8, 9.8),
+        (9.8, 10.0, 9.5, 9.6),
+        (9.6, 9.7, 7.0, 7.2),
+        (7.2, 7.3, 7.0, 7.1),
+        (7.1, 10.5, 7.0, 10.2),
+    ]
+    pad = [(10.0, 10.1, 9.9, 10.0)] * 122
+    rows = pad + inv_rows
+    while len(rows) < n:
+        rows.append((10.0, 10.05, 9.95, 10.0))
+    rows = rows[:n]
+    return [
+        make_candle(SYMBOL, TF, START + i * TF_SEC, o, h, l, c, is_closed=True)
+        for i, (o, h, l, c) in enumerate(rows)
+    ]
+
+
+def _f1_expiry_series(n: int) -> list:
+    """Real-detector F1 expiry: breaker near 59, no impulse → EXPIRED by 139 (max_age 80)."""
+    pad = [(10.0, 10.1, 9.9, 10.0)] * 50
+    base = [
+        (10.0, 10.5, 9.5, 10.0),
+        (10.0, 12.0, 9.8, 11.0),
+        (11.0, 11.2, 10.5, 10.8),
+        (11.0, 11.2, 9.8, 10.0),
+        (10.0, 10.5, 9.9, 10.2),
+        (10.2, 13.5, 10.0, 13.0),
+        (13.0, 13.2, 12.5, 12.8),
+        (12.8, 12.9, 9.0, 9.5),
+    ]
+    quiet = [(9.5, 9.55, 9.45, 9.5)] * max(n, 150)
+    rows = (pad + base + quiet)[:n]
+    return [
+        make_candle(SYMBOL, TF, START + i * TF_SEC, o, h, l, c, is_closed=True)
+        for i, (o, h, l, c) in enumerate(rows)
+    ]
+
+
 def _run(control: str, *, n: int, fault_schedule: Optional[dict] = None):
+    """Run with real F1 detector chain (BreakerBlock + Impulse), not ScriptedDetector."""
     setup = _setup_for(control)
-    candles = _candles(n)
-    det = ScriptedDetector(_script_for_control(control))
+    if control == "F1-completion":
+        candles = _f1_completion_series(n)
+    elif control == "F1-invalidation":
+        candles = _f1_invalidation_series(n)
+    else:
+        candles = _f1_expiry_series(n)
+    dets = [
+        BreakerBlockDetector(left_strength=1, right_strength=1),
+        ImpulseDetector(),
+    ]
     return setup, run_replay(
         ReplayRunConfig(
             setups=[setup],
-            detectors=[det],
+            detectors=dets,
             symbol=SYMBOL,
             timeframe=TF,
             timeframe_seconds=TF_SEC,

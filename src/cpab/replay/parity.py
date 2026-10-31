@@ -49,6 +49,8 @@ def _effective_inputs(rec: CycleRecord, *, ignore_live_metadata: bool = False) -
         "data_ok": rec.data_ok,
         "readiness_state": rec.readiness_state,
         "evaluation_blocked": rec.evaluation_blocked,
+        # HTF boundary content always compared when present.
+        "htf_ohlcs": mon.get("htf_ohlcs") or None,
     }
     if not ignore_live_metadata:
         out.update(

@@ -374,3 +374,37 @@ def test_replay_vs_live_style_full_match_on_closed_series():
     assert cmp.matching, cmp.to_dict()
     assert not cmp.input_divergence
     assert not cmp.engine_divergence
+
+
+def test_parity_deliberate_lag_mismatch_reports_input_divergence():
+    """Deliberate confirm_lag difference must surface as INPUT_DIVERGENCE when metadata compared."""
+    candles = _candles(12)
+    a = run_live_style(
+        LiveStyleConfig(
+            setups=[],
+            detectors=[EngulfingDetector()],
+            symbol=SYMBOL,
+            timeframe=TF,
+            timeframe_seconds=TF_SEC,
+            candles=candles,
+            arm_count=5,
+            confirm_lag_bars=1,
+            cache_max_size=100,
+        )
+    )
+    b = run_live_style(
+        LiveStyleConfig(
+            setups=[],
+            detectors=[EngulfingDetector()],
+            symbol=SYMBOL,
+            timeframe=TF,
+            timeframe_seconds=TF_SEC,
+            candles=candles,
+            arm_count=5,
+            confirm_lag_bars=3,
+            cache_max_size=100,
+        )
+    )
+    cmp = compare_replay_runs(a, b, ignore_live_metadata=False)
+    assert cmp.input_divergence, cmp.to_dict()
+    assert not cmp.matching
