@@ -72,11 +72,27 @@ def test_seed_fixture_sha256_matches_manifest():
         assert p.is_file()
 
 
+
+def _a6_record(fid: str):
+    """Decorator: record real_env_failed on any exception; re-raise (G1.4)."""
+    def deco(fn):
+        def wrapped(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                _mark(fid, False, error=str(exc))
+                raise
+        wrapped.__name__ = fn.__name__
+        wrapped.__doc__ = fn.__doc__
+        return wrapped
+    return deco
+
 def _mark(fid: str, ok: bool, **extra):
     status = "real_env_passed" if ok and real_talib_available() else (
         "stub_only" if ok else "real_env_failed"
     )
     record_a6(fid, status, extra=extra or None)
+
 
 
 def _run(setup, detectors, candles):
@@ -93,6 +109,7 @@ def _run(setup, detectors, candles):
     )
 
 
+@_a6_record("F1-completion-real")
 def test_a6_f1_completion_seed3():
     meta = _load_manifest()["cases"]["F1_completion_seed3"]
     candles = _load_candles(meta["file"])
@@ -114,6 +131,7 @@ def test_a6_f1_completion_seed3():
     _mark("F1-completion-real", ok, **observed)
 
 
+@_a6_record("F1-invalidation-real")
 def test_a6_f1_invalidation_seed1():
     meta = _load_manifest()["cases"]["F1_invalidation_seed1"]
     candles = _load_candles(meta["file"])
@@ -134,6 +152,7 @@ def test_a6_f1_invalidation_seed1():
     _mark("F1-invalidation-real", ok, **observed)
 
 
+@_a6_record("F1-expiry-real")
 def test_a6_f1_expiry_seed4():
     meta = _load_manifest()["cases"]["F1_expiry_seed4"]
     candles = _load_candles(meta["file"])
@@ -154,6 +173,7 @@ def test_a6_f1_expiry_seed4():
     _mark("F1-expiry-real", ok, **observed)
 
 
+@_a6_record("F2-completion-real")
 def test_a6_f2_completion_seed4():
     meta = _load_manifest()["cases"]["F2_completion_seed4"]
     candles = _load_candles(meta["file"])
@@ -201,6 +221,7 @@ def test_a6_f2_completion_seed4():
     _mark("F2-completion-real", True, **observed)
 
 
+@_a6_record("F2-invalidation-real")
 def test_a6_f2_invalidation_seed7():
     meta = _load_manifest()["cases"]["F2_invalidation_seed7"]
     candles = _load_candles(meta["file"])
@@ -260,6 +281,7 @@ def test_a6_f2_invalidation_seed7():
     _mark("F2-invalidation-real", True, **observed)
 
 
+@_a6_record("F3-completion-real")
 def test_a6_f3_completion_seed1():
     meta = _load_manifest()["cases"]["F3_completion_seed1"]
     candles = _load_candles(meta["file"])
@@ -277,6 +299,7 @@ def test_a6_f3_completion_seed1():
     _mark("F3-completion-real", ok, **observed)
 
 
+@_a6_record("F3-invalidation-real")
 def test_a6_f3_invalidation_seed23():
     meta = _load_manifest()["cases"]["F3_invalidation_seed23"]
     candles = _load_candles(meta["file"])
@@ -293,18 +316,6 @@ def test_a6_f3_invalidation_seed23():
     assert ok, observed
     _mark("F3-invalidation-real", ok, **observed)
 
-
-def test_a6_phase8a_fixtures_still_mark_evidence():
-    """Merged Phase 8A injected fixtures remain mandatory A6 keys."""
-    from tests.test_phase8b_real_detector_outcomes import (
-        test_a6_phase8a_completion,
-        test_a6_phase8a_invalidation,
-        test_a6_phase8a_expiry,
-    )
-    # Invoke directly so evidence is recorded when this module runs alone after sessionstart.
-    test_a6_phase8a_completion()
-    test_a6_phase8a_invalidation()
-    test_a6_phase8a_expiry()
 
 
 def test_detector_emitted_types_registry_covers_phase8b_detectors():
@@ -330,3 +341,49 @@ def test_real_talib_info_exposes_extension():
     assert info["talib_version"]
     assert info["talib_file"]
     assert ".so" in info["talib_extension"] or ".pyd" in info["talib_extension"] or ".dylib" in info["talib_extension"]
+
+
+def test_a6_mandatory_keys_have_exactly_one_writer():
+    """G1: each mandatory A6 key has exactly one designated seed/phase8a writer."""
+    import ast
+    from pathlib import Path
+    from cpab.replay.evidence import A6_DESIGNATED_WRITERS, A6_MANDATORY_KEYS
+
+    root = Path(__file__).resolve().parent
+    modules = {
+        "tests/test_phase8b_seed_fixtures.py": root / "test_phase8b_seed_fixtures.py",
+        "tests/test_phase8b_real_detector_outcomes.py": root / "test_phase8b_real_detector_outcomes.py",
+        "tests/test_phase8b_stall_matrix.py": root / "test_phase8b_stall_matrix.py",
+    }
+    # Map key -> list of (module, function) that call record_a6/mark with that key
+    writers: dict[str, list[str]] = {k: [] for k in A6_MANDATORY_KEYS}
+    for mod_label, path in modules.items():
+        if not path.exists():
+            continue
+        src = path.read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            fname = node.name
+            # Scan function source for key string literals passed to record_a6 / _mark
+            chunk = ast.get_source_segment(src, node) or ""
+            for key in A6_MANDATORY_KEYS:
+                if f'"{key}"' in chunk or f"'{key}'" in chunk:
+                    # Heuristic: only count if record_a6 or _mark appears in function
+                    if "record_a6" in chunk or "_mark(" in chunk:
+                        writers[key].append(f"{mod_label}::{fname}")
+
+    for key in A6_MANDATORY_KEYS:
+        found = writers[key]
+        designated = A6_DESIGNATED_WRITERS[key]
+        assert len(found) >= 1, f"A6 key {key} has zero writers"
+        # Exactly one designated writer must be present; no writers outside designated
+        assert designated in found, (
+            f"A6 key {key}: designated writer {designated} not found among {found}"
+        )
+        # Disallow other writers (constructed-series tests)
+        extras = [w for w in found if w != designated]
+        # Allow meta-tests that only list keys without recording
+        extras = [w for w in extras if "test_a6_mandatory" not in w and "acceptance_meta" not in w]
+        assert not extras, f"A6 key {key} has extra writers: {extras}"

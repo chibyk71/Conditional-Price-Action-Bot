@@ -519,68 +519,69 @@ def test_stall_scenario_locked_window(scenario):
 
 
 def test_acceptance_meta_requires_real_env_for_all_24():
-    """A15: every mandatory stall scenario must be real_env_passed. No exemptions (E1)."""
+    """A15: every mandatory stall scenario must be real_env_passed. No exemptions (E1/G2).
+
+    Validates the on-disk manifest only — does not copy in-memory EVIDENCE.
+    """
     if not _real_talib_available():
         pytest.fail("A15 meta-test: real TA-Lib is not available")
-    for s in generate_stall_scenarios():
-        key = s["key"]
-        if key in EVIDENCE:
-            record_stall(key, EVIDENCE[key])
+    from cpab.replay.evidence import current_run_id, validate_run_identity
+
     manifest = load_manifest()
-    run = manifest.get("run") or {}
-    assert run.get("commit"), f"A15 run identity missing: {run}"
-    assert run.get("talib_version"), f"A15 missing talib_version: {run}"
-    assert run.get("talib_file"), f"A15 missing talib_file: {run}"
+    run = validate_run_identity(manifest)
+    run_id = run["run_id"]
+    assert current_run_id() == run_id, (current_run_id(), run_id)
     stall = manifest.get("stall") or {}
     missing = []
     bad = []
+    mismatched = []
     for s in generate_stall_scenarios():
         key = str(s["key"])
         entry = stall.get(key)
-        status = entry.get("status") if isinstance(entry, dict) else None
-        if status is None:
+        if not isinstance(entry, dict):
             missing.append(key)
-        elif status != "real_env_passed":
+            continue
+        if entry.get("run_id") != run_id:
+            mismatched.append((key, entry.get("run_id")))
+        status = entry.get("status")
+        if status != "real_env_passed":
             bad.append((key, status))
     assert not missing, f"A15 stall missing from manifest: {missing}"
+    assert not mismatched, f"A15 stall run_id mismatch: {mismatched}"
     assert not bad, f"A15 stall not real_env_passed: {bad}"
 
 
 def test_acceptance_meta_a6_real_detector_evidence():
-    """A15: durable manifest is sole authority for mandatory A6 fixture evidence."""
+    """A15: durable manifest is sole authority for mandatory A6 fixture evidence (G2).
+
+    Does not copy in-memory A6_EVIDENCE into the manifest before validation.
+    """
     if not _real_talib_available():
         pytest.fail("A15: real TA-Lib unavailable")
-    for key, status in list(A6_EVIDENCE.items()):
-        record_a6(key, status)
+    from cpab.replay.evidence import A6_MANDATORY_KEYS, current_run_id, validate_run_identity
+
     manifest = load_manifest()
-    run = manifest.get("run") or {}
-    assert run.get("commit"), f"A15 run identity missing: {run}"
-    assert run.get("talib_version"), f"A15 missing talib_version: {run}"
-    assert run.get("talib_file"), f"A15 missing talib_file: {run}"
+    run = validate_run_identity(manifest)
+    run_id = run["run_id"]
+    assert current_run_id() == run_id
     a6 = manifest.get("a6") or {}
-    required = [
-        "phase8a-completion",
-        "phase8a-invalidation",
-        "phase8a-expiry",
-        "F1-completion-real",
-        "F1-invalidation-real",
-        "F1-expiry-real",
-        "F2-completion-real",
-        "F2-invalidation-real",
-        "F3-completion-real",
-        "F3-invalidation-real",
-    ]
     missing = []
     bad = []
-    for key in required:
+    mismatched = []
+    for key in A6_MANDATORY_KEYS:
         entry = a6.get(key)
-        status = entry.get("status") if isinstance(entry, dict) else None
-        if status is None:
+        if not isinstance(entry, dict):
             missing.append(key)
-        elif status != "real_env_passed":
+            continue
+        if entry.get("run_id") != run_id:
+            mismatched.append((key, entry.get("run_id")))
+        status = entry.get("status")
+        if status != "real_env_passed":
             bad.append((key, status))
     assert not missing, f"A6 evidence missing from manifest: {missing}"
+    assert not mismatched, f"A6 run_id mismatch: {mismatched}"
     assert not bad, f"A6 evidence not real_env_passed: {bad}"
+
 
 
 def test_f1_completion_clean_control_real_detectors():
@@ -589,25 +590,13 @@ def test_f1_completion_clean_control_real_detectors():
 
 
 def test_matrix_evidence_report_24_rows():
-    """Complete 24-row matrix evidence summary from the current run (E1: all real_env_passed)."""
-    for s in generate_stall_scenarios():
-        key = s["key"]
-        if key in EVIDENCE:
-            record_stall(
-                key,
-                EVIDENCE[key],
-                extra={
-                    "control": s["control"],
-                    "state_at_s": s["state_at_s"],
-                    "fault_class": s["fault_class"],
-                    "d": s["d"],
-                    "s": s["s"],
-                    "r": s["r"],
-                    "t": s["t"],
-                    "E": s["E"],
-                },
-            )
+    """Complete 24-row matrix evidence from current-run manifest only (G2)."""
+    from cpab.replay.evidence import current_run_id, validate_run_identity
+
     manifest = load_manifest()
+    run = validate_run_identity(manifest)
+    run_id = run["run_id"]
+    assert current_run_id() == run_id
     stall = manifest.get("stall") or {}
     rows = []
     for s in generate_stall_scenarios():
@@ -625,11 +614,18 @@ def test_matrix_evidence_report_24_rows():
                 "t": s["t"],
                 "E": s["E"],
                 "status": entry.get("status") if isinstance(entry, dict) else None,
+                "run_id": entry.get("run_id") if isinstance(entry, dict) else None,
             }
         )
     assert len(rows) == 24
-    missing = [row for row in rows if row["status"] != "real_env_passed"]
-    assert not missing, f"matrix evidence incomplete (A15 requires all real_env_passed): {missing}"
+    missing = [
+        row for row in rows
+        if row["status"] != "real_env_passed" or row["run_id"] != run_id
+    ]
+    assert not missing, (
+        f"matrix evidence incomplete (A15 requires all real_env_passed same run): {missing}"
+    )
+
 
 
 def _mutate_faulted_to_advance(faulted, setup_id: str, r: int, E: int, t: int, terminal: str) -> None:
@@ -689,16 +685,50 @@ def test_mutation_unhealthy_helper_rejects_advance():
 
 
 def test_mutation_readiness_helper_rejects_advance():
-    """E2: real helper must fail when readiness-blocked path advances to terminal.
+    """G3 HOLD: document genuine readiness behaviour, then reject mutated terminal.
 
-    Under HOLD the genuine readiness run already fails the helper; mutation still
-    verifies the helper rejects a terminal state in r..E.
+    Under HOLD the genuine readiness run fails revision-8 assertions
+    (RECOVERING lag: blocked cycles include r). Record observed behaviour,
+    then show a mutated terminal state inside the prohibited window is rejected.
+    Does not claim readiness scenarios pass revision-8 acceptance.
     """
     control, s, r, t, E, d = "F1-completion", 70, 71, 98, 100, 1
     setup, clean = _run(control, n=E + 5)
     setup_f, faulted = _run(control, n=E + 5, fault_schedule=_fault_schedule(s, d, "readiness_blocked"))
-    # Genuine readiness run fails under HOLD (RECOVERING lag) — that is expected.
-    # Mutation: force terminal in r..E; helper must still raise on that violation.
+
+    # Document genuine observed behaviour (HOLD evidence).
+    injected_blocked = [
+        rec.cycle_index
+        for rec in faulted.cycles
+        if rec.injected_fault == "readiness_blocked"
+    ]
+    eval_blocked = [
+        rec.cycle_index for rec in faulted.cycles if rec.evaluation_blocked
+    ]
+    readiness_seq = [
+        (rec.cycle_index, rec.readiness_state, rec.evaluation_blocked, rec.injected_fault)
+        for rec in faulted.cycles
+        if s - 1 <= rec.cycle_index <= r + 2
+    ]
+    # Injected fault occupies [s, r-1]; evaluation_blocked also covers recovery at r.
+    assert injected_blocked == list(range(s, r)), injected_blocked
+    assert r in eval_blocked, (
+        f"expected recovery cycle r={r} in evaluation_blocked; got {eval_blocked}; seq={readiness_seq}"
+    )
+    # Genuine revision-8 helper fails under HOLD (document, do not claim pass).
+    genuine_failed = False
+    try:
+        _assert_stall_window(
+            control=control, s=s, r=r, t=t, E=E, d=d, fc="readiness_blocked",
+            state_at_s="PENDING", setup=setup, clean=clean, setup_f=setup_f, faulted=faulted,
+        )
+    except AssertionError:
+        genuine_failed = True
+    assert genuine_failed, (
+        "HOLD expects genuine readiness run to fail revision-8 helper; it passed unexpectedly"
+    )
+
+    # Mutation: force terminal in r..E; helper must still raise.
     _mutate_faulted_to_advance(
         faulted, setup_f.setup_id, r, E, t, LifecycleState.COMPLETED.value
     )
@@ -707,3 +737,4 @@ def test_mutation_readiness_helper_rejects_advance():
             control=control, s=s, r=r, t=t, E=E, d=d, fc="readiness_blocked",
             state_at_s="PENDING", setup=setup, clean=clean, setup_f=setup_f, faulted=faulted,
         )
+
