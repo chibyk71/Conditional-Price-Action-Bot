@@ -40,7 +40,6 @@ def series_1m(
     n: int = 20,
     base: float = 100.0,
 ) -> list[Candle]:
-    """Ascending 1m closed candles with mild oscillation."""
     out = []
     price = base
     for i in range(n):
@@ -62,12 +61,8 @@ def sample_1m() -> list[Candle]:
 
 
 def pytest_sessionstart(session):
-    """A15: Phase 8B evidence must come from this run, not a checked-in manifest.
-
-    Fail closed: missing/invalid commit identity or inability to stamp aborts the session.
-    """
+    """A15: Phase 8B evidence from this run only. Fail closed on identity errors."""
     from cpab.replay.evidence import begin_acceptance_run
 
-    # Capture pytest invocation args for the run block (G2.3).
     pytest_args = list(sys.argv)
     begin_acceptance_run(note="pytest_sessionstart", pytest_args=pytest_args)

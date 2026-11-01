@@ -1,11 +1,7 @@
 """Shared Phase 8B acceptance evidence registries (A15).
 
-Evidence is written both in-memory and to a durable JSON manifest so acceptance
-does not depend on pytest collection order within a single process, and a
-complete record survives the test run for review.
-
 A15 rules (G2):
-- Commit identity must be exact 40-hex git rev-parse HEAD; "unknown" is rejected.
+- Commit identity is always `git rev-parse HEAD` (40-hex); callers cannot override.
 - Working tree must be clean (git status --porcelain empty).
 - Each run starts with a fresh manifest and a unique run_id.
 - Meta-tests validate the on-disk manifest only (no in-memory copy fallback).
@@ -24,10 +20,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-# Stall matrix: (control, state_at_s, fault_class, d) -> status
 STALL_EVIDENCE: dict[tuple, str] = {}
-
-# A6 outcome fixtures: fixture_id -> status
 A6_EVIDENCE: dict[str, str] = {}
 
 A6_MANDATORY_KEYS: tuple[str, ...] = (
@@ -43,7 +36,6 @@ A6_MANDATORY_KEYS: tuple[str, ...] = (
     "F3-invalidation-real",
 )
 
-# Designated sole writers for each A6 key (module::function).
 A6_DESIGNATED_WRITERS: dict[str, str] = {
     "phase8a-completion": "tests/test_phase8b_real_detector_outcomes.py::test_a6_phase8a_completion",
     "phase8a-invalidation": "tests/test_phase8b_real_detector_outcomes.py::test_a6_phase8a_invalidation",
@@ -58,15 +50,12 @@ A6_DESIGNATED_WRITERS: dict[str, str] = {
 }
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
-
 _DEFAULT_MANIFEST = Path(
     os.environ.get(
         "CPAB_PHASE8B_EVIDENCE_PATH",
         str(Path("/tmp") / "cpab_phase8b_a15_evidence.json"),
     )
 )
-
-# Current run identity (set by begin_acceptance_run).
 _CURRENT_RUN_ID: str | None = None
 
 
@@ -105,17 +94,21 @@ def _dependency_set_hash() -> str:
 
 def begin_acceptance_run(
     *,
-    commit: str | None = None,
     note: str = "",
     pytest_args: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Start a fresh A15 run: clear evidence, stamp run identity, reject dirty trees."""
+    """Start a fresh A15 run. Commit is always git rev-parse HEAD (no override)."""
     global _CURRENT_RUN_ID
 
-    resolved_commit = commit or _git_commit()
+    resolved_commit = _git_commit()
     if resolved_commit == "unknown" or not _COMMIT_RE.match(resolved_commit):
         raise RuntimeError(
             f"A15: commit identity must be exact 40-hex SHA; got {resolved_commit!r}"
+        )
+
+    if pytest_args is None or not isinstance(pytest_args, list) or len(pytest_args) == 0:
+        raise RuntimeError(
+            f"A15: pytest_args must be a non-empty list of actual invocation arguments; got {pytest_args!r}"
         )
 
     porcelain = _git_porcelain()
@@ -125,7 +118,6 @@ def begin_acceptance_run(
     talib_meta: dict[str, Any] = {}
     try:
         from cpab.replay.real_talib import real_talib_info
-
         talib_meta = real_talib_info()
     except Exception as exc:
         talib_meta = {"talib_error": str(exc)}
@@ -146,7 +138,7 @@ def begin_acceptance_run(
             "working_tree_clean": clean,
             "git_status_porcelain": porcelain,
             "dependency_set_sha256": dep_hash,
-            "pytest_args": list(pytest_args or []),
+            "pytest_args": list(pytest_args),
             "platform": platform.platform(),
             "python": platform.python_version(),
             "talib_version": talib_meta.get("talib_version"),
@@ -203,7 +195,6 @@ def load_manifest() -> dict[str, Any]:
 
 
 def clear_evidence() -> None:
-    """Reset in-memory and on-disk evidence (does not stamp a new run)."""
     global _CURRENT_RUN_ID
     STALL_EVIDENCE.clear()
     A6_EVIDENCE.clear()
@@ -214,23 +205,46 @@ def clear_evidence() -> None:
 
 
 def validate_run_identity(manifest: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Fail closed if run identity is incomplete or invalid."""
+    """Fail closed if run identity is incomplete or invalid (G2)."""
     data = manifest if manifest is not None else load_manifest()
     run = data.get("run") or {}
+
     commit = run.get("commit")
     if not commit or not _COMMIT_RE.match(str(commit)):
         raise AssertionError(f"A15 invalid commit identity: {commit!r}")
+    actual_head = _git_commit()
+    if str(commit) != actual_head:
+        raise AssertionError(
+            f"A15 commit {commit!r} does not match git rev-parse HEAD {actual_head!r}"
+        )
+
     if run.get("working_tree_clean") is not True:
         raise AssertionError(
             f"A15 working tree is dirty or cleanliness unset: "
             f"clean={run.get('working_tree_clean')!r} porcelain={run.get('git_status_porcelain')!r}"
         )
-    if not run.get("dependency_set_sha256"):
-        raise AssertionError("A15 missing dependency_set_sha256")
-    if not run.get("talib_version") or not run.get("talib_file"):
-        raise AssertionError(f"A15 missing TA-Lib identity: {run}")
+    porcelain = run.get("git_status_porcelain")
+    if porcelain is None:
+        raise AssertionError("A15 missing git_status_porcelain")
+    if str(porcelain).strip() != "":
+        raise AssertionError(f"A15 working tree not clean: {porcelain!r}")
+
+    dep = run.get("dependency_set_sha256")
+    if not dep or not isinstance(dep, str) or not re.fullmatch(r"[0-9a-f]{64}", dep):
+        raise AssertionError(f"A15 invalid dependency_set_sha256: {dep!r}")
+
+    args = run.get("pytest_args")
+    if not isinstance(args, list) or len(args) == 0:
+        raise AssertionError(f"A15 missing or empty pytest_args: {args!r}")
+
     if not run.get("run_id"):
         raise AssertionError("A15 missing run_id")
     if not run.get("python"):
         raise AssertionError("A15 missing python version")
+    if not run.get("talib_version"):
+        raise AssertionError(f"A15 missing talib_version: {run}")
+    if not run.get("talib_file"):
+        raise AssertionError(f"A15 missing talib_file: {run}")
+    if not run.get("talib_extension"):
+        raise AssertionError(f"A15 missing talib_extension: {run}")
     return run

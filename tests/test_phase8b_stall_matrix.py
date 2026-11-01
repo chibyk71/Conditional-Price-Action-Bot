@@ -476,17 +476,22 @@ def _assert_stall_window(
     ids=lambda s: f"{s['control']}_{s['state_at_s']}_{s['fault_class']}_d{s['d']}",
 )
 def test_stall_scenario_locked_window(scenario):
+    """Full-scenario failure-recording boundary (G1).
+
+    Every operation required to execute the scenario is inside the try block so
+    setup/execution failures also produce durable real_env_failed evidence.
+    """
     key = scenario["key"]
-    s, r, t, E = scenario["s"], scenario["r"], scenario["t"], scenario["E"]
-    d = scenario["d"]
     fc = scenario["fault_class"]
-    control = scenario["control"]
-    n = max(E, t) + 5
-
-    setup, clean = _run(control, n=n)
-    setup_f, faulted = _run(control, n=n, fault_schedule=_fault_schedule(s, d, fc))
-
     try:
+        s, r, t, E = scenario["s"], scenario["r"], scenario["t"], scenario["E"]
+        d = scenario["d"]
+        control = scenario["control"]
+        n = max(E, t) + 5
+
+        setup, clean = _run(control, n=n)
+        setup_f, faulted = _run(control, n=n, fault_schedule=_fault_schedule(s, d, fc))
+
         _assert_stall_window(
             control=control,
             s=s,
@@ -503,23 +508,31 @@ def test_stall_scenario_locked_window(scenario):
         )
         status = "real_env_passed" if _real_talib_available() else "stub_only"
         EVIDENCE[key] = status
-        record_stall(key, status)
-    except AssertionError as exc:
+        record_stall(key, status, extra={"fault_class": fc, "control": control})
+    except Exception as exc:
         status = "real_env_failed"
         EVIDENCE[key] = status
-        record_stall(
-            key,
-            status,
-            extra={
-                "reason": str(exc),
-                "fault_class": fc,
-            },
-        )
+        try:
+            record_stall(
+                key,
+                status,
+                extra={
+                    "reason": str(exc),
+                    "fault_class": fc,
+                    "control": scenario.get("control"),
+                    "exc_type": type(exc).__name__,
+                },
+            )
+        except Exception as rec_exc:
+            raise RuntimeError(
+                f"A15: failed to record real_env_failed for {key!r}: {rec_exc}"
+            ) from exc
         raise
 
 
-def test_acceptance_meta_requires_real_env_for_all_24():
-    """A15: every mandatory stall scenario must be real_env_passed. No exemptions (E1/G2).
+
+def test_z_acceptance_meta_requires_real_env_for_all_24():
+    """A15: every mandatory stall scenario must be real_env_passed. No exemptions.
 
     Validates the on-disk manifest only — does not copy in-memory EVIDENCE.
     """
@@ -551,8 +564,9 @@ def test_acceptance_meta_requires_real_env_for_all_24():
     assert not bad, f"A15 stall not real_env_passed: {bad}"
 
 
-def test_acceptance_meta_a6_real_detector_evidence():
-    """A15: durable manifest is sole authority for mandatory A6 fixture evidence (G2).
+
+def test_z_acceptance_meta_a6_real_detector_evidence():
+    """A15: durable manifest is sole authority for mandatory A6 fixture evidence.
 
     Does not copy in-memory A6_EVIDENCE into the manifest before validation.
     """
@@ -589,7 +603,7 @@ def test_f1_completion_clean_control_real_detectors():
     assert result.final_setup_states.get(setup.setup_id) == LifecycleState.COMPLETED.value
 
 
-def test_matrix_evidence_report_24_rows():
+def test_z_matrix_evidence_report_24_rows():
     """Complete 24-row matrix evidence from current-run manifest only (G2)."""
     from cpab.replay.evidence import current_run_id, validate_run_identity
 
@@ -738,3 +752,125 @@ def test_mutation_readiness_helper_rejects_advance():
             state_at_s="PENDING", setup=setup, clean=clean, setup_f=setup_f, faulted=faulted,
         )
 
+
+
+def _record_scenario_outcome(key, fc, control, fn):
+    """Minimal G1 recording boundary mirror for isolation tests."""
+    try:
+        fn()
+        status = "real_env_passed" if _real_talib_available() else "stub_only"
+        EVIDENCE[key] = status
+        record_stall(key, status, extra={"fault_class": fc, "control": control})
+    except Exception as exc:
+        status = "real_env_failed"
+        EVIDENCE[key] = status
+        try:
+            record_stall(
+                key,
+                status,
+                extra={
+                    "reason": str(exc),
+                    "fault_class": fc,
+                    "control": control,
+                    "exc_type": type(exc).__name__,
+                },
+            )
+        except Exception as rec_exc:
+            raise RuntimeError(
+                f"A15: failed to record real_env_failed for {key!r}: {rec_exc}"
+            ) from exc
+        raise
+
+
+def test_stall_recording_on_clean_run_failure(monkeypatch):
+    """G1: failure during clean _run records real_env_failed and re-raises."""
+    import tests.test_phase8b_stall_matrix as mod
+    from cpab.replay import evidence as ev
+
+    key = ("__g1_clean_fail__", "PENDING", "unhealthy", 1)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected clean _run failure")
+
+    monkeypatch.setattr(mod, "_run", boom)
+
+    def body():
+        mod._run("F1-completion", n=10)
+
+    with pytest.raises(RuntimeError, match="injected clean"):
+        _record_scenario_outcome(key, "unhealthy", "F1-completion", body)
+    manifest = load_manifest()
+    entry = (manifest.get("stall") or {}).get(str(key))
+    assert isinstance(entry, dict), entry
+    assert entry["status"] == "real_env_failed"
+    assert entry.get("run_id") == ev.current_run_id()
+
+
+def test_stall_recording_on_faulted_run_failure(monkeypatch):
+    """G1: failure during faulted _run records real_env_failed and re-raises."""
+    import tests.test_phase8b_stall_matrix as mod
+    from cpab.replay import evidence as ev
+
+    key = ("__g1_faulted_fail__", "PENDING", "unhealthy", 1)
+    real_run = mod._run
+
+    def selective(*args, **kwargs):
+        if kwargs.get("fault_schedule") is not None:
+            raise RuntimeError("injected faulted _run failure")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(mod, "_run", selective)
+
+    def body():
+        mod._run("F1-completion", n=10)
+        mod._run("F1-completion", n=10, fault_schedule={"70": {"unhealthy": True}})
+
+    with pytest.raises(RuntimeError, match="injected faulted"):
+        _record_scenario_outcome(key, "unhealthy", "F1-completion", body)
+    manifest = load_manifest()
+    entry = (manifest.get("stall") or {}).get(str(key))
+    assert isinstance(entry, dict)
+    assert entry["status"] == "real_env_failed"
+    assert entry.get("run_id") == ev.current_run_id()
+
+
+def test_stall_recording_on_assertion_failure(monkeypatch):
+    """G1: assertion failure inside helper records real_env_failed and re-raises."""
+    import tests.test_phase8b_stall_matrix as mod
+    from cpab.replay import evidence as ev
+
+    key = ("__g1_assert_fail__", "PENDING", "unhealthy", 1)
+
+    def boom(**kwargs):
+        raise AssertionError("injected assertion failure")
+
+    monkeypatch.setattr(mod, "_assert_stall_window", boom)
+
+    def body():
+        setup, clean = mod._run("F1-completion", n=110)
+        setup_f, faulted = mod._run(
+            "F1-completion", n=110, fault_schedule=mod._fault_schedule(70, 1, "unhealthy")
+        )
+        mod._assert_stall_window(
+            control="F1-completion",
+            s=70, r=71, t=98, E=100, d=1, fc="unhealthy",
+            state_at_s="PENDING", setup=setup, clean=clean, setup_f=setup_f, faulted=faulted,
+        )
+
+    with pytest.raises(AssertionError, match="injected assertion"):
+        _record_scenario_outcome(key, "unhealthy", "F1-completion", body)
+    manifest = load_manifest()
+    entry = (manifest.get("stall") or {}).get(str(key))
+    assert isinstance(entry, dict)
+    assert entry["status"] == "real_env_failed"
+    assert entry.get("run_id") == ev.current_run_id()
+
+
+def test_stall_failed_record_not_overwritten_as_passed():
+    """G1: a real_env_failed record remains failed; meta requires real_env_passed."""
+    from cpab.replay import evidence as ev
+    key = ("__g1_probe__", "PENDING", "unhealthy", 1)
+    record_stall(key, "real_env_failed", extra={"probe": True})
+    entry = (load_manifest().get("stall") or {}).get(str(key))
+    assert entry["status"] == "real_env_failed"
+    assert entry.get("run_id") == ev.current_run_id()
