@@ -1,1 +1,6 @@
-PLACEHOLDER_WILL_FAIL
+# Phase 8B — Reconciled contract and acceptance criteria (APPROVED revision 9 = revision 8 plus the readiness_blocked overlay R1 (sections 3, 6 stall rule, scenario table, A13); owner-locked and implemented on `feature/phase-8b-replay-parity-validation`; revision 8: section 6 made consistent with section 6b (the eight F1 rows are the entire mandatory stall-matrix scope; no F2/F3 stall rows in Phase 8B); revision 7: A15 enforcement rule, explicit mandatory vs deferred scope (section 6b), frozen F2 delayed-confirmation timelines; revision 6: four consistency conditions folded in (programmatic matrix with per-run evidence status, blocked vs diagnostic separation, effective-input parity, catalogue/allowlist tests); revision 5: stall matrix groups 2a/2b made consistent with A12-A14, undefined N replaced by r..E; revision 4: `Ns` dropped from analyst path, explicit s/r/t/E scenario table, evidence-boundary section)
+
+Status: APPROVED and implemented. Owner locked revision 9; implementation is on `feature/phase-8b-replay-parity-validation` (PR #33). Technical requirements and R1 timing are unchanged from the locked text. Authorization for merge remains separate and requires independent review of this PR.
+Repo basis: `main` at `b93606e` (PR #32 merged). `src/` is identical to the earlier `e205ae4` tip I audited (PR #32 changed only docs and tests), so my source-based findings still apply.
+
+SEE LOCAL ARTIFACTS phase-8b-review-corrections for full body — content truncated in push path; applying full file next.
