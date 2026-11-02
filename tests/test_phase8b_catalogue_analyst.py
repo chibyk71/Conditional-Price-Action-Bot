@@ -161,66 +161,79 @@ def test_analyst_accepts_allowlisted_pair():
     assert setup.expression.type == "market_structure"  # type: ignore[attr-defined]
 
 
-def test_doc_catalogue_matches_code_both_directions():
-    """A3: every documented catalogue entry equals the code-defined catalogue."""
-    text = DOCS.read_text(encoding="utf-8")
-    # Parse markdown tables for emitted type / variants.
-    # Pattern: | type_name | variants |
+def _parse_doc_catalogue_pairs(text: str) -> set[tuple[str, str | None]]:
+    """Parse only the Verified emitted type/variant tables (not fixtures)."""
+    start = text.find("## Verified emitted type / variant pairs")
+    end = text.find("## Canonical fixtures")
+    assert start >= 0 and end > start, "catalogue section markers missing from docs"
+    section = text[start:end]
     doc_pairs: set[tuple[str, str | None]] = set()
-    # Rows like: | swing_high | pivot_lr |
-    # or: | bullish_engulfing | *(none)* |
     row_re = re.compile(
         r"^\|\s*`?([a-z][a-z0-9_]*)`?\s*\|\s*([^|]+)\|",
         re.MULTILINE,
     )
-    for m in row_re.finditer(text):
+    for m in row_re.finditer(section):
         t = m.group(1).strip()
         raw_v = m.group(2).strip()
-        if t in ("Emitted type", "emitted type", "---") or t.startswith("-"):
+        if t in ("Emitted type", "emitted type") or t.startswith("-"):
             continue
-        if t not in CATALOGUE and t not in {
-            x[0] for x in ANALYST_ALLOWLIST
-        }:
-            # skip narrative rows
-            if " " in t or t[0].isupper():
-                continue
         variants_text = raw_v.replace("`", "").replace("*", "").strip()
         if variants_text.lower() in ("(none)", "none", ""):
             doc_pairs.add((t, None))
-        else:
-            # split on comma
-            for part in re.split(r"[,/]", variants_text):
-                part = part.strip()
-                if not part or part.lower() in ("none",):
-                    continue
-                # strip trailing notes
-                part = part.split()[0] if part.split() else part
-                if re.match(r"^[a-z][a-z0-9_]*$", part):
-                    doc_pairs.add((t, part))
+            continue
+        for part in re.split(r"[,/]", variants_text):
+            part = part.strip()
+            if not part or part.lower() in ("none",):
+                continue
+            part = part.split()[0] if part.split() else part
+            if re.match(r"^[a-z][a-z0-9_]*$", part):
+                doc_pairs.add((t, part))
+    return doc_pairs
 
-    # Code → doc: every catalogue type should appear in the doc.
-    missing_in_doc = []
+
+def test_doc_catalogue_matches_code_both_directions():
+    """A3: catalogue/doc parity fails for missing, extra, invalid type/variant.
+
+    Both directions: code catalogue against documentation and documentation
+    against code. The 33-pair analyst allowlist remains independently checked.
+    """
+    text = DOCS.read_text(encoding="utf-8")
+    doc_pairs = _parse_doc_catalogue_pairs(text)
+
+    missing_in_doc: list[tuple[str, str | None]] = []
     for t, variants in CATALOGUE.items():
         if not variants:
-            if (t, None) not in doc_pairs and t not in {p[0] for p in doc_pairs}:
+            if (t, None) not in doc_pairs:
                 missing_in_doc.append((t, None))
         else:
             for v in variants:
-                if (t, v) not in doc_pairs and t not in {p[0] for p in doc_pairs}:
+                if (t, v) not in doc_pairs:
                     missing_in_doc.append((t, v))
-    # Soft check: at least the allowlist types are documented.
-    for t, v in ANALYST_ALLOWLIST:
-        assert t in CATALOGUE
-        assert is_catalogue_pair(t, v)
+    assert not missing_in_doc, (
+        f"A3 code→doc missing entries ({len(missing_in_doc)}): {missing_in_doc[:20]}"
+    )
 
-    # Doc → code: any clearly parsed type that looks like a catalogue key must
-    # exist in the code catalogue when the type string is known.
+    extra_or_invalid: list[tuple[str, str | None, str]] = []
     for t, v in doc_pairs:
-        if t in CATALOGUE:
-            if v is None:
-                assert not CATALOGUE[t] or True  # engulfing-style
-            else:
-                assert v in CATALOGUE[t] or is_catalogue_pair(t, v)
+        if t not in CATALOGUE:
+            extra_or_invalid.append((t, v, "unknown_type"))
+            continue
+        code_variants = CATALOGUE[t]
+        if v is None:
+            if code_variants:
+                extra_or_invalid.append((t, v, "type_requires_variant"))
+        else:
+            if v not in code_variants:
+                extra_or_invalid.append((t, v, "invalid_variant"))
+    assert not extra_or_invalid, (
+        f"A3 doc→code extra/invalid entries ({len(extra_or_invalid)}): "
+        f"{extra_or_invalid[:20]}"
+    )
+
+    assert len(ANALYST_ALLOWLIST) == 33
+    for t, v in ANALYST_ALLOWLIST:
+        assert t in CATALOGUE, f"allowlist type {t} not in catalogue"
+        assert is_catalogue_pair(t, v), f"allowlist pair ({t}, {v}) not valid"
 
 
 def test_report_setup_types_warns_unwired():

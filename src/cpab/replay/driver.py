@@ -62,7 +62,14 @@ class CycleRecord:
     effective_candle_ohlcs: tuple[tuple[int, float, float, float, float, float], ...] = ()
     effective_detector_names: tuple[str, ...] = ()
     injected_fault: Optional[str] = None
-    newly_accepted_observations: tuple[tuple[str, str, Optional[str], Optional[int], Optional[int]], ...] = ()
+    # R6: full identity + payload for emitted and newly accepted observations.
+    # Each entry: (id, type, variant, candle_epoch, confirmed_at, payload_dict)
+    newly_accepted_observations: tuple[
+        tuple[str, str, Optional[str], Optional[int], Optional[int], dict], ...
+    ] = ()
+    emitted_observations: tuple[
+        tuple[str, str, Optional[str], Optional[int], Optional[int], dict], ...
+    ] = ()
 
 
 @dataclass
@@ -354,21 +361,76 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
         accepted_ids = tuple(mon.newly_accepted_observation_ids) if mon else ()
         sig_ids = tuple(s.id for s in signals)
         by_id = {o.id: o for o in store.all()}
-        accepted_obs: list[tuple[str, str, Optional[str], Optional[int], Optional[int]]] = []
-        for oid in accepted_ids:
+
+        def _obs_tuple(oid: str) -> tuple[str, str, Optional[str], Optional[int], Optional[int], dict]:
             obs = by_id.get(oid)
-            if obs is not None:
-                accepted_obs.append(
-                    (
-                        obs.id,
-                        obs.type,
-                        getattr(obs, "variant", None),
-                        getattr(obs, "candle_epoch", None),
-                        getattr(obs, "confirmed_at", None),
-                    )
-                )
-            else:
-                accepted_obs.append((oid, "unknown", None, None, None))
+            if obs is None:
+                return (oid, "unknown", None, None, None, {})
+            payload = dict(getattr(obs, "payload", None) or {})
+            return (
+                obs.id,
+                obs.type,
+                getattr(obs, "variant", None),
+                getattr(obs, "candle_epoch", None),
+                getattr(obs, "confirmed_at", None),
+                payload,
+            )
+
+        accepted_obs = [_obs_tuple(oid) for oid in accepted_ids]
+        emitted_obs = [_obs_tuple(oid) for oid in emitted_ids]
+
+        # R6: full monitoring view (series / setups / readiness), not only blocked + signal count.
+        mon_view: dict[str, Any]
+        if mon is not None:
+            mon_view = {
+                "evaluation_blocked": mon.evaluation_blocked,
+                "block_reason": mon.block_reason,
+                "signal_count": mon.signal_count,
+                "signal_ids": tuple(mon.signal_ids),
+                "readiness_state": mon.readiness_state,
+                "readiness_reason": mon.readiness_reason,
+                "series": tuple(
+                    {
+                        "symbol": sv.symbol,
+                        "timeframe": sv.timeframe,
+                        "data_ok": sv.data_ok,
+                        "diagnostics": tuple(sv.diagnostics),
+                        "evaluation_candle_epoch": sv.evaluation_candle_epoch,
+                    }
+                    for sv in mon.series
+                ),
+                "setups": tuple(
+                    {
+                        "setup_id": sv.setup_id,
+                        "instance_id": sv.instance_id,
+                        "config_id": sv.config_id,
+                        "enabled": sv.enabled,
+                        "state": sv.state,
+                        "previous_state": sv.previous_state,
+                        "transitioned": sv.transitioned,
+                        "diagnostic_only": sv.diagnostic_only,
+                        "reasons": tuple(sv.reasons),
+                        "anchor_candle_epoch": sv.anchor_candle_epoch,
+                        "last_evaluation_candle": sv.last_evaluation_candle,
+                    }
+                    for sv in mon.setups
+                ),
+                "detector_emitted_observation_ids": tuple(mon.detector_emitted_observation_ids),
+                "newly_accepted_observation_ids": tuple(mon.newly_accepted_observation_ids),
+            }
+        else:
+            mon_view = {
+                "evaluation_blocked": blocked,
+                "block_reason": None,
+                "signal_count": len(signals),
+                "signal_ids": sig_ids,
+                "readiness_state": readiness.state.value,
+                "readiness_reason": "",
+                "series": (),
+                "setups": (),
+                "detector_emitted_observation_ids": emitted_ids,
+                "newly_accepted_observation_ids": accepted_ids,
+            }
 
         rec = CycleRecord(
             cycle_index=cycle_idx,
@@ -381,16 +443,14 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
             emitted_observation_ids=emitted_ids,
             newly_accepted_observation_ids=accepted_ids,
             newly_accepted_observations=tuple(accepted_obs),
+            emitted_observations=tuple(emitted_obs),
             setup_states=setup_states,
             setup_previous_states=setup_prev,
             setup_reasons=setup_reasons,
             setup_anchors=setup_anchors,
             setup_diagnostic_only=setup_diag,
             signal_ids=sig_ids,
-            monitoring={
-                "evaluation_blocked": mon.evaluation_blocked if mon else blocked,
-                "signal_count": mon.signal_count if mon else len(signals),
-            },
+            monitoring=mon_view,
             effective_candle_epochs=tuple(c.epoch for c in visible),
             effective_candle_ohlcs=tuple(
                 (c.epoch, float(c.open), float(c.high), float(c.low), float(c.close),

@@ -40,29 +40,32 @@ class ParityComparison:
         }
 
 
-def _effective_inputs(rec: CycleRecord, *, ignore_live_metadata: bool = False) -> dict[str, Any]:
+def _effective_inputs(rec: CycleRecord) -> dict[str, Any]:
+    """A10: always record and compare effective inputs. No metadata suppression.
+
+    Compared fields:
+    - cache cap (cache_max_size)
+    - confirmation-lag settings (confirm_lag_bars)
+    - HTF source/construction (htf_source, htf_epochs, htf_ohlcs)
+    - candles actually visible to the engine (effective_candle_epochs/ohlcs)
+    - readiness/health (readiness_state, data_ok, evaluation_blocked)
+    - detector order (effective_detector_names)
+    """
     mon = rec.monitoring or {}
-    out: dict[str, Any] = {
+    return {
         "effective_candle_epochs": rec.effective_candle_epochs,
         "effective_candle_ohlcs": rec.effective_candle_ohlcs,
         "effective_detector_names": rec.effective_detector_names,
         "data_ok": rec.data_ok,
         "readiness_state": rec.readiness_state,
         "evaluation_blocked": rec.evaluation_blocked,
-        # HTF boundary content always compared when present.
+        "confirm_lag_bars": mon.get("confirm_lag_bars"),
+        "cache_max_size": mon.get("cache_max_size"),
+        "htf_epochs": mon.get("htf_epochs"),
+        "htf_source": mon.get("htf_source"),
         "htf_ohlcs": mon.get("htf_ohlcs") or None,
+        "completed_count": mon.get("completed_count"),
     }
-    if not ignore_live_metadata:
-        out.update(
-            {
-                "confirm_lag_bars": mon.get("confirm_lag_bars"),
-                "cache_max_size": mon.get("cache_max_size"),
-                "htf_epochs": mon.get("htf_epochs"),
-                "htf_source": mon.get("htf_source"),
-                "completed_count": mon.get("completed_count"),
-            }
-        )
-    return out
 
 
 def _behavior_fields(rec: CycleRecord) -> dict[str, Any]:
@@ -80,12 +83,12 @@ def compare_replay_runs(
     run_b: ReplayResult,
     *,
     setup_ids: Optional[Sequence[str]] = None,
-    ignore_live_metadata: bool = False,
 ) -> ParityComparison:
     """Compare two independent runs cycle-by-cycle.
 
-    Effective inputs are compared first. Any input mismatch is reported as
-    INPUT_DIVERGENCE and prevents an ENGINE_DIVERGENCE claim for that cycle.
+    Effective inputs are always compared first (A10). Any input mismatch is
+    reported as INPUT_DIVERGENCE before outcome comparison and prevents an
+    ENGINE_DIVERGENCE claim for that cycle. Metadata suppression is removed.
     """
     result = ParityComparison(matching=True)
     n = min(len(run_a.cycles), len(run_b.cycles))
@@ -105,8 +108,8 @@ def compare_replay_runs(
     for i in range(n):
         a = run_a.cycles[i]
         b = run_b.cycles[i]
-        a_in = _effective_inputs(a, ignore_live_metadata=ignore_live_metadata)
-        b_in = _effective_inputs(b, ignore_live_metadata=ignore_live_metadata)
+        a_in = _effective_inputs(a)
+        b_in = _effective_inputs(b)
         input_mismatch = False
         for key in a_in:
             if a_in[key] != b_in[key]:
