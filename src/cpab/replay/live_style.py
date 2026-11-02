@@ -388,6 +388,81 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
                 f"window={len(window)} completed={len(completed)}"
             )
 
+        emitted_ids = (
+            tuple(mon.detector_emitted_observation_ids) if mon else ()
+        )
+        accepted_ids = (
+            tuple(mon.newly_accepted_observation_ids) if mon else ()
+        )
+        by_id = {o.id: o for o in store.all()}
+
+        def _obs_tuple(oid: str):
+            obs = by_id.get(oid)
+            if obs is None:
+                return (oid, "unknown", None, None, None, {})
+            payload = dict(getattr(obs, "payload", None) or {})
+            return (
+                obs.id,
+                obs.type,
+                getattr(obs, "variant", None),
+                getattr(obs, "candle_epoch", None),
+                getattr(obs, "confirmed_at", None),
+                payload,
+            )
+
+        accepted_obs = tuple(_obs_tuple(oid) for oid in accepted_ids)
+        emitted_obs = tuple(_obs_tuple(oid) for oid in emitted_ids)
+        sig_ids = tuple(s.id for s in signals)
+
+        mon_view = {
+            "evaluation_blocked": mon.evaluation_blocked if mon else blocked,
+            "block_reason": mon.block_reason if mon else None,
+            "signal_count": mon.signal_count if mon else len(signals),
+            "signal_ids": tuple(mon.signal_ids) if mon else sig_ids,
+            "readiness_state": mon.readiness_state if mon else readiness.state.value,
+            "readiness_reason": mon.readiness_reason if mon else "",
+            "series": tuple(
+                {
+                    "symbol": sv.symbol,
+                    "timeframe": sv.timeframe,
+                    "data_ok": sv.data_ok,
+                    "diagnostics": tuple(sv.diagnostics),
+                    "evaluation_candle_epoch": sv.evaluation_candle_epoch,
+                }
+                for sv in (mon.series if mon else ())
+            ),
+            "setups": tuple(
+                {
+                    "setup_id": sv.setup_id,
+                    "instance_id": sv.instance_id,
+                    "config_id": sv.config_id,
+                    "enabled": sv.enabled,
+                    "state": sv.state,
+                    "previous_state": sv.previous_state,
+                    "transitioned": sv.transitioned,
+                    "diagnostic_only": sv.diagnostic_only,
+                    "reasons": tuple(sv.reasons),
+                    "anchor_candle_epoch": sv.anchor_candle_epoch,
+                    "last_evaluation_candle": sv.last_evaluation_candle,
+                }
+                for sv in (mon.setups if mon else ())
+            ),
+            "detector_emitted_observation_ids": emitted_ids,
+            "newly_accepted_observation_ids": accepted_ids,
+            "cache_max_size": config.cache_max_size,
+            "confirm_lag_bars": config.confirm_lag_bars,
+            "htf_ohlcs": (
+                tuple(
+                    (c.epoch, float(c.open), float(c.high), float(c.low), float(c.close),
+                     1.0 if c.is_closed else 0.0)
+                    for c in (htf_cache.completed() if htf_cache is not None else ())
+                )
+            ),
+            "htf_epochs": htf_epochs,
+            "htf_source": htf_source_label,
+            "completed_count": len(completed),
+        }
+
         rec = CycleRecord(
             cycle_index=cycle_idx,
             candle_epoch=latest.epoch if latest else None,
@@ -396,34 +471,17 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
             data_ok=data_ok,
             data_diagnostics=data_diag,
             evaluation_blocked=blocked,
-            emitted_observation_ids=tuple(mon.detector_emitted_observation_ids)
-            if mon
-            else (),
-            newly_accepted_observation_ids=tuple(mon.newly_accepted_observation_ids)
-            if mon
-            else (),
+            emitted_observation_ids=emitted_ids,
+            newly_accepted_observation_ids=accepted_ids,
+            newly_accepted_observations=accepted_obs,
+            emitted_observations=emitted_obs,
             setup_states=setup_states,
             setup_previous_states=setup_prev,
             setup_reasons=setup_reasons,
             setup_anchors=setup_anchors,
             setup_diagnostic_only=setup_diag,
-            signal_ids=tuple(s.id for s in signals),
-            monitoring={
-                "evaluation_blocked": mon.evaluation_blocked if mon else blocked,
-                "signal_count": mon.signal_count if mon else len(signals),
-                "cache_max_size": config.cache_max_size,
-                "confirm_lag_bars": config.confirm_lag_bars,
-                "htf_ohlcs": (
-                    tuple(
-                        (c.epoch, float(c.open), float(c.high), float(c.low), float(c.close),
-                         1.0 if c.is_closed else 0.0)
-                        for c in (htf_cache.completed() if htf_cache is not None else ())
-                    )
-                ),
-                "htf_epochs": htf_epochs,
-                "htf_source": htf_source_label,
-                "completed_count": len(completed),
-            },
+            signal_ids=sig_ids,
+            monitoring=mon_view,
             effective_candle_epochs=effective_epochs,
             effective_candle_ohlcs=tuple(
                 (c.epoch, float(c.open), float(c.high), float(c.low), float(c.close),

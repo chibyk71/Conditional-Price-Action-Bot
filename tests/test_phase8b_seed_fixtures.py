@@ -191,7 +191,7 @@ def test_a6_f2_completion_seed4():
     hl_event_idx = hl_confirm_idx = None
     engine_obs = []
     for rec in r.cycles:
-        for oid, otype, variant, c_epoch, conf_at in rec.newly_accepted_observations:
+        for oid, otype, variant, c_epoch, conf_at, *_rest in rec.newly_accepted_observations:
             engine_obs.append((rec.cycle_index, otype, variant, c_epoch, conf_at))
             if otype == "market_structure" and variant == "hl" and c_epoch is not None:
                 ei = (c_epoch - START) // STEP
@@ -239,7 +239,7 @@ def test_a6_f2_invalidation_seed7():
     ll_event_idx = ll_confirm_idx = None
     engine_obs = []
     for rec in r.cycles:
-        for oid, otype, variant, c_epoch, conf_at in rec.newly_accepted_observations:
+        for oid, otype, variant, c_epoch, conf_at, *_rest in rec.newly_accepted_observations:
             engine_obs.append((rec.cycle_index, otype, variant, c_epoch, conf_at))
             if otype == "market_structure" and variant == "ll" and c_epoch is not None:
                 ei = (c_epoch - START) // STEP
@@ -253,7 +253,7 @@ def test_a6_f2_invalidation_seed7():
         for rec in r.cycles:
             if rec.cycle_index != tc:
                 continue
-            for oid, otype, variant, c_epoch, conf_at in rec.newly_accepted_observations:
+            for oid, otype, variant, c_epoch, conf_at, *_rest in rec.newly_accepted_observations:
                 if otype == "market_structure" and variant == "ll" and c_epoch is not None:
                     ll_event_idx = (c_epoch - START) // STEP
                     ll_confirm_idx = (conf_at - START) // STEP if conf_at is not None else None
@@ -316,6 +316,70 @@ def test_a6_f3_invalidation_seed23():
     assert ok, observed
     _mark("F3-invalidation-real", ok, **observed)
 
+
+
+
+def test_a6_completion_deterministic_signal_identity_from_fresh_state():
+    """A6: repeat F1/F2/F3 completion from fresh state; identical terminals + signal IDs.
+
+    F2's frozen confirmation timeline (HL event 75 / confirm 76) is preserved.
+    """
+    cases = [
+        (
+            "F1_completion_seed3",
+            False,
+        ),
+        (
+            "F2_completion_seed4",
+            True,
+        ),
+        (
+            "F3_completion_seed1",
+            False,
+        ),
+    ]
+    for case_key, is_f2 in cases:
+        meta = _load_manifest()["cases"][case_key]
+        candles = _load_candles(meta["file"])
+        setup = _load_setup(meta["setup"])
+        runs = []
+        for _ in range(2):
+            if case_key.startswith("F1"):
+                dets = [
+                    BreakerBlockDetector(left_strength=1, right_strength=1),
+                    ImpulseDetector(),
+                ]
+            elif case_key.startswith("F2"):
+                dets = [
+                    MarketStructureDetector(
+                        left_strength=1, right_strength=1, tie_policy="strict"
+                    ),
+                    EngulfingDetector(),
+                    ImpulseDetector(),
+                ]
+            else:
+                dets = [ZonePolarityFlipDetector(), EngulfingDetector()]
+            runs.append(_run(setup, dets, candles))
+        a, b = runs
+        assert a.final_setup_states == b.final_setup_states, case_key
+        assert [s.id for s in a.signals] == [s.id for s in b.signals], (
+            case_key,
+            [s.id for s in a.signals],
+            [s.id for s in b.signals],
+        )
+        assert a.final_setup_states.get(setup.setup_id) == meta["expected_terminal"], case_key
+        tc_a = a.transition_cycle(setup.setup_id, meta["expected_terminal"])
+        tc_b = b.transition_cycle(setup.setup_id, meta["expected_terminal"])
+        assert tc_a == tc_b == meta["expected_transition_idx"], (
+            case_key,
+            tc_a,
+            tc_b,
+            meta["expected_transition_idx"],
+        )
+        if is_f2:
+            for rec in a.cycles:
+                if rec.cycle_index < 76:
+                    assert rec.setup_states.get(setup.setup_id) != LifecycleState.COMPLETED.value
 
 
 def test_detector_emitted_types_registry_covers_phase8b_detectors():

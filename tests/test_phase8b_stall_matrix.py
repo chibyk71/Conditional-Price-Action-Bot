@@ -863,7 +863,7 @@ def _record_scenario_outcome(key, fc, control, fn):
 
 def test_stall_recording_on_clean_run_failure(monkeypatch):
     """G1: failure during clean _run records real_env_failed and re-raises."""
-    import tests.test_phase8b_stall_matrix as mod
+    import test_phase8b_stall_matrix as mod
     from cpab.replay import evidence as ev
 
     key = ("__g1_clean_fail__", "PENDING", "unhealthy", 1)
@@ -887,7 +887,7 @@ def test_stall_recording_on_clean_run_failure(monkeypatch):
 
 def test_stall_recording_on_faulted_run_failure(monkeypatch):
     """G1: failure during faulted _run records real_env_failed and re-raises."""
-    import tests.test_phase8b_stall_matrix as mod
+    import test_phase8b_stall_matrix as mod
     from cpab.replay import evidence as ev
 
     key = ("__g1_faulted_fail__", "PENDING", "unhealthy", 1)
@@ -915,7 +915,7 @@ def test_stall_recording_on_faulted_run_failure(monkeypatch):
 
 def test_stall_recording_on_assertion_failure(monkeypatch):
     """G1: assertion failure inside helper records real_env_failed and re-raises."""
-    import tests.test_phase8b_stall_matrix as mod
+    import test_phase8b_stall_matrix as mod
     from cpab.replay import evidence as ev
 
     key = ("__g1_assert_fail__", "PENDING", "unhealthy", 1)

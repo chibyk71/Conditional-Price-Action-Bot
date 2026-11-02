@@ -110,8 +110,12 @@ def test_replay_vs_live_style_matching_on_identical_inputs():
     # Live-style must record production knobs; pure replay leaves them None.
     # INPUT_DIVERGENCE on lag/cache metadata alone is expected and not a failure
     # of outcome parity — assert no ENGINE_DIVERGENCE.
-    cmp2 = compare_replay_runs(replay, live, setup_ids=[setup.setup_id], ignore_live_metadata=True)
-    assert cmp2.matching and not cmp2.input_divergence and not cmp2.engine_divergence, cmp2.to_dict()
+    # A10: metadata is always compared. Replay leaves lag/cache None while
+    # live-style records production knobs → INPUT_DIVERGENCE is expected;
+    # outcomes must still match and there must be no ENGINE_DIVERGENCE.
+    cmp2 = compare_replay_runs(replay, live, setup_ids=[setup.setup_id])
+    assert cmp2.input_divergence, cmp2.to_dict()
+    assert not cmp2.engine_divergence, cmp2.to_dict()
     # Live-style records production knobs.
     assert live.cycles[0].monitoring is not None
     assert live.cycles[0].monitoring.get("confirm_lag_bars") == 1
@@ -368,12 +372,12 @@ def test_replay_vs_live_style_full_match_on_closed_series():
     for a, b in zip(replay.cycles, live.cycles):
         assert a.effective_candle_epochs == b.effective_candle_epochs
         assert a.setup_states == b.setup_states
-    cmp = compare_replay_runs(
-        replay, live, setup_ids=[setup.setup_id], ignore_live_metadata=True
-    )
-    assert cmp.matching, cmp.to_dict()
-    assert not cmp.input_divergence
-    assert not cmp.engine_divergence
+    # A10: no metadata suppression. Input knobs differ (replay vs live) so
+    # INPUT_DIVERGENCE is reported before outcome comparison; engine path must
+    # still match on behavior fields checked above.
+    cmp = compare_replay_runs(replay, live, setup_ids=[setup.setup_id])
+    assert cmp.input_divergence, cmp.to_dict()
+    assert not cmp.engine_divergence, cmp.to_dict()
 
 
 def test_parity_deliberate_lag_mismatch_reports_input_divergence():
@@ -405,6 +409,6 @@ def test_parity_deliberate_lag_mismatch_reports_input_divergence():
             cache_max_size=100,
         )
     )
-    cmp = compare_replay_runs(a, b, ignore_live_metadata=False)
+    cmp = compare_replay_runs(a, b)
     assert cmp.input_divergence, cmp.to_dict()
     assert not cmp.matching
