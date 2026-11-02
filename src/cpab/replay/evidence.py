@@ -239,6 +239,31 @@ def validate_run_identity(manifest: dict[str, Any] | None = None) -> dict[str, A
 
     if not run.get("run_id"):
         raise AssertionError("A15 missing run_id")
+    try:
+        import uuid as _uuid
+        _uuid.UUID(str(run["run_id"]))
+    except Exception as exc:
+        raise AssertionError(f"A15 run_id is not a valid UUID: {run.get('run_id')!r}") from exc
+    # Cross-check TA-Lib metadata against a fresh probe when available.
+    try:
+        from cpab.replay.real_talib import real_talib_info
+        fresh = real_talib_info()
+        if run.get("talib_version") != fresh.get("talib_version"):
+            raise AssertionError(
+                f"A15 talib_version drift: manifest={run.get('talib_version')!r} live={fresh.get('talib_version')!r}"
+            )
+        if run.get("talib_file") != fresh.get("talib_file"):
+            raise AssertionError(
+                f"A15 talib_file drift: manifest={run.get('talib_file')!r} live={fresh.get('talib_file')!r}"
+            )
+        if run.get("talib_extension") != fresh.get("talib_extension"):
+            raise AssertionError(
+                f"A15 talib_extension drift: manifest={run.get('talib_extension')!r} live={fresh.get('talib_extension')!r}"
+            )
+    except AssertionError:
+        raise
+    except Exception:
+        pass  # probe unavailable — identity fields still required above
     if not run.get("python"):
         raise AssertionError("A15 missing python version")
     if not run.get("talib_version"):

@@ -114,10 +114,16 @@ def f1_rows() -> list[StallRow]:
 FAULT_CLASSES = ("unhealthy", "readiness_blocked", "missing_candle")
 
 
+def _e_rb(row: StallRow) -> int:
+    """Readiness-class check-window end: E_rb = max(r+5, t+2) (R1 / Rev 9)."""
+    return max(row.r + 5, row.t + 2)
+
+
 def generate_stall_scenarios() -> list[dict[str, Any]]:
     out = []
     for row in f1_rows():
         for fc in FAULT_CLASSES:
+            e_rb = _e_rb(row)
             out.append(
                 {
                     "control": row.control,
@@ -127,6 +133,8 @@ def generate_stall_scenarios() -> list[dict[str, Any]]:
                     "r": row.r,
                     "t": row.t,
                     "E": row.E,
+                    # Readiness uses E_rb; unhealthy/missing_candle use E.
+                    "E_rb": e_rb,
                     "fault_class": fc,
                     "key": (row.control, row.state_at_s, fc, row.d),
                 }
@@ -346,8 +354,14 @@ def _assert_stall_window(
     clean,
     setup_f,
     faulted,
+    E_rb: int | None = None,
 ) -> None:
-    """Reusable A12–A14 assertions shared by matrix and mutation tests (E2)."""
+    """Reusable A12–A14 assertions shared by matrix and mutation tests.
+
+    Fault-class specific post-recovery rules (Rev 9 / R1):
+    - unhealthy / missing_candle: j=r, STALLED r+1, window r..E
+    - readiness_blocked: blocked [s,r], j=r+1, STALLED r+2, window r+1..E_rb
+    """
     clean_terminal = clean.final_setup_states.get(setup.setup_id)
     if control == "F1-completion":
         assert clean_terminal == LifecycleState.COMPLETED.value, clean_terminal
@@ -380,9 +394,12 @@ def _assert_stall_window(
             break
 
     if fc == "readiness_blocked":
+        # R1: blocked on [s, r] inclusive (injected [s,r-1] + RECOVERING at r).
         for i, rec in enumerate(faulted.cycles):
-            if s <= rec.cycle_index < r:
-                assert rec.evaluation_blocked or rec.injected_fault == "readiness_blocked"
+            if s <= rec.cycle_index <= r:
+                assert rec.evaluation_blocked or rec.injected_fault == "readiness_blocked", (
+                    f"cycle {rec.cycle_index} must be evaluation_blocked under R1"
+                )
                 assert faulted.lifecycle_calls_per_cycle[i] == 0, (
                     f"lifecycle calls must be 0 on blocked cycle {rec.cycle_index}"
                 )
@@ -405,9 +422,16 @@ def _assert_stall_window(
                 assert an == anchor_before, (rec.cycle_index, an, anchor_before)
                 assert not rec.signal_ids
 
-    # r..E: no terminal, no signal; diagnostic continuity for unhealthy/missing.
+    # Post-recovery window: class-specific start/end.
+    if fc == "readiness_blocked":
+        win_start = r + 1
+        win_end = E_rb if E_rb is not None else max(r + 5, t + 2)
+    else:
+        win_start = r
+        win_end = E
+
     for rec in faulted.cycles:
-        if not (r <= rec.cycle_index <= E):
+        if not (win_start <= rec.cycle_index <= win_end):
             continue
         st = rec.setup_states.get(setup_f.setup_id)
         if st in (
@@ -415,9 +439,13 @@ def _assert_stall_window(
             LifecycleState.INVALIDATED.value,
             LifecycleState.EXPIRED.value,
         ):
-            raise AssertionError(f"terminal {st} at cycle {rec.cycle_index} inside r..E after {fc}")
+            raise AssertionError(
+                f"terminal {st} at cycle {rec.cycle_index} inside {win_start}..{win_end} after {fc}"
+            )
         if rec.signal_ids:
-            raise AssertionError(f"signal at cycle {rec.cycle_index} inside r..E after {fc}")
+            raise AssertionError(
+                f"signal at cycle {rec.cycle_index} inside {win_start}..{win_end} after {fc}"
+            )
         if fc in ("unhealthy", "missing_candle"):
             assert rec.setup_diagnostic_only.get(setup_f.setup_id, False), (
                 f"expected diagnostic_only at cycle {rec.cycle_index} in r..E after {fc}, state={st}"
@@ -427,28 +455,52 @@ def _assert_stall_window(
                 assert "discontinuous evaluation candle" in reasons, reasons
         if fc == "readiness_blocked":
             assert rec.setup_diagnostic_only.get(setup_f.setup_id, False), (
-                f"post-block cycle {rec.cycle_index} must be diagnostic_only"
+                f"post-recovery cycle {rec.cycle_index} must be diagnostic_only under R1"
             )
+            reasons = " ".join(rec.setup_reasons.get(setup_f.setup_id, ()))
+            assert "discontinuous evaluation candle" in reasons, reasons
 
     report = classify_stalled(faulted, setup_f.setup_id, injected_fault_cause=fc)
     assert report.injected_fault_cause == fc
 
     if fc == "readiness_blocked":
-        expected_blocked = list(range(s, r))
+        # R1: injected [s, r-1]; effective blocked [s, r] including RECOVERING.
+        expected_injected = list(range(s, r))
+        expected_blocked = list(range(s, r + 1))
         injected_blocked = [
             rec.cycle_index
             for rec in faulted.cycles
             if rec.injected_fault == "readiness_blocked"
         ]
-        assert injected_blocked == expected_blocked, (injected_blocked, expected_blocked)
-        # HOLD: strict — no RECOVERING tolerance; readiness stays real_env_failed until R1.
+        assert injected_blocked == expected_injected, (injected_blocked, expected_injected)
         assert report.blocked_cycles == expected_blocked, (
             f"blocked_cycles expected {expected_blocked}, got {report.blocked_cycles}"
         )
-        assert report.first_discontinuity_cycle == r, report.first_discontinuity_cycle
-        assert report.stalled_classified_at == r + 1, report.stalled_classified_at
+        assert report.first_discontinuity_cycle == r + 1, (
+            f"first_discontinuity_cycle expected {r + 1}, got {report.first_discontinuity_cycle}"
+        )
+        assert report.stalled_classified_at == r + 2, (
+            f"stalled_classified_at expected {r + 2}, got {report.stalled_classified_at}"
+        )
+        assert report.first_discontinuity_expected_epoch is not None
+        assert report.first_discontinuity_actual_epoch is not None
+        assert (
+            report.first_discontinuity_expected_epoch
+            != report.first_discontinuity_actual_epoch
+        )
+        if report.first_discontinuity_last_accepted_epoch is not None:
+            assert (
+                report.first_discontinuity_expected_epoch
+                == report.first_discontinuity_last_accepted_epoch + TF_SEC
+            )
         for bc in report.blocked_cycles:
             assert bc not in report.subsequent_diagnostic_cycles
+            # No blocked cycle may be diagnostic_only.
+            for rec in faulted.cycles:
+                if rec.cycle_index == bc:
+                    assert not rec.setup_diagnostic_only.get(setup_f.setup_id, False), (
+                        f"blocked cycle {bc} must not be diagnostic_only"
+                    )
     elif fc in ("unhealthy", "missing_candle"):
         assert report.blocked_cycles == []
         assert report.first_discontinuity_cycle == r, (
@@ -505,6 +557,7 @@ def test_stall_scenario_locked_window(scenario):
             clean=clean,
             setup_f=setup_f,
             faulted=faulted,
+            E_rb=scenario.get("E_rb"),
         )
         status = "real_env_passed" if _real_talib_available() else "stub_only"
         EVIDENCE[key] = status
@@ -699,59 +752,85 @@ def test_mutation_unhealthy_helper_rejects_advance():
 
 
 def test_mutation_readiness_helper_rejects_advance():
-    """G3 HOLD: document genuine readiness behaviour, then reject mutated terminal.
-
-    Under HOLD the genuine readiness run fails revision-8 assertions
-    (RECOVERING lag: blocked cycles include r). Record observed behaviour,
-    then show a mutated terminal state inside the prohibited window is rejected.
-    Does not claim readiness scenarios pass revision-8 acceptance.
-    """
+    """R1: genuine readiness run passes helper; mutated terminal is rejected."""
     control, s, r, t, E, d = "F1-completion", 70, 71, 98, 100, 1
-    setup, clean = _run(control, n=E + 5)
-    setup_f, faulted = _run(control, n=E + 5, fault_schedule=_fault_schedule(s, d, "readiness_blocked"))
+    E_rb = max(r + 5, t + 2)
+    setup, clean = _run(control, n=E_rb + 5)
+    setup_f, faulted = _run(control, n=E_rb + 5, fault_schedule=_fault_schedule(s, d, "readiness_blocked"))
 
-    # Document genuine observed behaviour (HOLD evidence).
-    injected_blocked = [
-        rec.cycle_index
-        for rec in faulted.cycles
-        if rec.injected_fault == "readiness_blocked"
-    ]
-    eval_blocked = [
-        rec.cycle_index for rec in faulted.cycles if rec.evaluation_blocked
-    ]
-    readiness_seq = [
-        (rec.cycle_index, rec.readiness_state, rec.evaluation_blocked, rec.injected_fault)
-        for rec in faulted.cycles
-        if s - 1 <= rec.cycle_index <= r + 2
-    ]
-    # Injected fault occupies [s, r-1]; evaluation_blocked also covers recovery at r.
-    assert injected_blocked == list(range(s, r)), injected_blocked
-    assert r in eval_blocked, (
-        f"expected recovery cycle r={r} in evaluation_blocked; got {eval_blocked}; seq={readiness_seq}"
-    )
-    # Genuine revision-8 helper fails under HOLD (document, do not claim pass).
-    genuine_failed = False
-    try:
-        _assert_stall_window(
-            control=control, s=s, r=r, t=t, E=E, d=d, fc="readiness_blocked",
-            state_at_s="PENDING", setup=setup, clean=clean, setup_f=setup_f, faulted=faulted,
-        )
-    except AssertionError:
-        genuine_failed = True
-    assert genuine_failed, (
-        "HOLD expects genuine readiness run to fail revision-8 helper; it passed unexpectedly"
+    # Genuine R1 run must pass the shared helper.
+    _assert_stall_window(
+        control=control, s=s, r=r, t=t, E=E, d=d, fc="readiness_blocked",
+        state_at_s="PENDING", setup=setup, clean=clean, setup_f=setup_f, faulted=faulted,
+        E_rb=E_rb,
     )
 
-    # Mutation: force terminal in r..E; helper must still raise.
+    # Mutation: force terminal in recovery window; helper must raise.
     _mutate_faulted_to_advance(
-        faulted, setup_f.setup_id, r, E, t, LifecycleState.COMPLETED.value
+        faulted, setup_f.setup_id, r + 1, E_rb, t, LifecycleState.COMPLETED.value
     )
     with pytest.raises(AssertionError):
         _assert_stall_window(
             control=control, s=s, r=r, t=t, E=E, d=d, fc="readiness_blocked",
             state_at_s="PENDING", setup=setup, clean=clean, setup_f=setup_f, faulted=faulted,
+            E_rb=E_rb,
         )
 
+
+def test_readiness_sequence_ready_degraded_recovering_ready():
+    """R1: pin real ReadinessManager sequence on d=1 and d=5 readiness faults."""
+    for s, d, r in [(70, 1, 71), (70, 5, 75)]:
+        setup_f, faulted = _run(
+            "F1-completion", n=r + 10, fault_schedule=_fault_schedule(s, d, "readiness_blocked")
+        )
+        # Collect readiness states around the fault window.
+        seq = []
+        for rec in faulted.cycles:
+            if s - 1 <= rec.cycle_index <= r + 2:
+                seq.append((rec.cycle_index, rec.readiness_state, rec.evaluation_blocked))
+        # Before fault: READY, not blocked.
+        pre = [x for x in seq if x[0] == s - 1]
+        assert pre and pre[0][1] == "READY" and pre[0][2] is False, seq
+        # Injected cycles [s, r-1]: DEGRADED (or equivalent non-READY), blocked.
+        for cyc in range(s, r):
+            rows = [x for x in seq if x[0] == cyc]
+            assert rows, (cyc, seq)
+            assert rows[0][2] is True, (cyc, rows)
+            assert rows[0][1] != "READY", (cyc, rows)
+        # Cycle r: RECOVERING, still blocked, zero lifecycle calls.
+        rows_r = [x for x in seq if x[0] == r]
+        assert rows_r, seq
+        assert rows_r[0][1] == "RECOVERING", (rows_r, seq)
+        assert rows_r[0][2] is True, rows_r
+        # r+1: READY (or eligible); first continuity diagnostic cycle.
+        rows_rp1 = [x for x in seq if x[0] == r + 1]
+        assert rows_rp1, seq
+        assert rows_rp1[0][1] == "READY", (rows_rp1, seq)
+        assert rows_rp1[0][2] is False, rows_rp1
+
+
+def test_readiness_negative_underreports_recovering_cycle():
+    """R1 negative: asserting blocked == [s,r-1] only must fail."""
+    control, s, r, t, E, d = "F1-completion", 70, 71, 98, 100, 1
+    E_rb = max(r + 5, t + 2)
+    setup, clean = _run(control, n=E_rb + 5)
+    setup_f, faulted = _run(control, n=E_rb + 5, fault_schedule=_fault_schedule(s, d, "readiness_blocked"))
+    report = classify_stalled(faulted, setup_f.setup_id, injected_fault_cause="readiness_blocked")
+    # Genuine blocked is [s, r]; under-report would be [s, r-1].
+    assert report.blocked_cycles == list(range(s, r + 1))
+    with pytest.raises(AssertionError):
+        assert report.blocked_cycles == list(range(s, r))
+
+
+def test_readiness_negative_stalled_at_r_plus_1():
+    """R1 negative: STALLED at r+1 (Rev 8 timing) must fail under Rev 9."""
+    control, s, r, t, E, d = "F1-completion", 70, 71, 98, 100, 1
+    E_rb = max(r + 5, t + 2)
+    setup_f, faulted = _run(control, n=E_rb + 5, fault_schedule=_fault_schedule(s, d, "readiness_blocked"))
+    report = classify_stalled(faulted, setup_f.setup_id, injected_fault_cause="readiness_blocked")
+    assert report.stalled_classified_at == r + 2
+    with pytest.raises(AssertionError):
+        assert report.stalled_classified_at == r + 1
 
 
 def _record_scenario_outcome(key, fc, control, fn):
