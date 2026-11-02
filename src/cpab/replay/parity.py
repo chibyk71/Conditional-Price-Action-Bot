@@ -1,4 +1,4 @@
-"""Replay vs live-style parity with effective-input comparison (R7–R8, A10–A11)."""
+"""Replay vs live-style parity with effective-input comparison (R7-R8, A10-A11)."""
 
 from __future__ import annotations
 
@@ -43,13 +43,16 @@ class ParityComparison:
 def _effective_inputs(rec: CycleRecord) -> dict[str, Any]:
     """A10: always record and compare effective inputs. No metadata suppression.
 
-    Compared fields:
-    - cache cap (cache_max_size)
-    - confirmation-lag settings (confirm_lag_bars)
-    - HTF source/construction (htf_source, htf_epochs, htf_ohlcs)
-    - candles actually visible to the engine (effective_candle_epochs/ohlcs)
-    - readiness/health (readiness_state, data_ok, evaluation_blocked)
-    - detector order (effective_detector_names)
+    Compared fields (contract):
+    - candles actually visible after window/cache (epochs + OHLC)
+    - confirmation-lag / closed-candle settings (confirm_lag_bars)
+    - cache / evaluation configuration (cache_max_size, completed_count)
+    - HTF source and construction (htf_source, htf_epochs, htf_ohlcs)
+    - readiness and health (readiness_state, data_ok, evaluation_blocked)
+    - detector identities and order (effective_detector_names)
+
+    Missing metadata is never treated as equal to a known value: both sides
+    must record these keys explicitly for a successful match.
     """
     mon = rec.monitoring or {}
     return {
@@ -63,7 +66,7 @@ def _effective_inputs(rec: CycleRecord) -> dict[str, Any]:
         "cache_max_size": mon.get("cache_max_size"),
         "htf_epochs": mon.get("htf_epochs"),
         "htf_source": mon.get("htf_source"),
-        "htf_ohlcs": mon.get("htf_ohlcs") or None,
+        "htf_ohlcs": mon.get("htf_ohlcs") if mon.get("htf_ohlcs") is not None else (),
         "completed_count": mon.get("completed_count"),
     }
 
@@ -86,24 +89,16 @@ def compare_replay_runs(
 ) -> ParityComparison:
     """Compare two independent runs cycle-by-cycle.
 
-    Effective inputs are always compared first (A10). Any input mismatch is
-    reported as INPUT_DIVERGENCE before outcome comparison and prevents an
-    ENGINE_DIVERGENCE claim for that cycle. Metadata suppression is removed.
+    Ordering rule (first-divergence):
+    1. Walk the common cycle range in chronological order.
+    2. Report the earliest actual divergence by cycle index and field.
+    3. Only report a cycle-count / length mismatch if no earlier divergence exists.
+
+    Effective inputs are always compared before outcomes. Any input mismatch is
+    INPUT_DIVERGENCE and prevents an ENGINE_DIVERGENCE claim for that cycle.
     """
     result = ParityComparison(matching=True)
     n = min(len(run_a.cycles), len(run_b.cycles))
-    if len(run_a.cycles) != len(run_b.cycles):
-        d = Divergence(
-            cycle_index=n,
-            field="cycle_count",
-            expected=len(run_a.cycles),
-            actual=len(run_b.cycles),
-            kind=INPUT_DIVERGENCE,
-        )
-        result.divergences.append(d)
-        result.first_divergence = d
-        result.matching = False
-        result.input_divergence = True
 
     for i in range(n):
         a = run_a.cycles[i]
@@ -111,13 +106,15 @@ def compare_replay_runs(
         a_in = _effective_inputs(a)
         b_in = _effective_inputs(b)
         input_mismatch = False
-        for key in a_in:
-            if a_in[key] != b_in[key]:
+        for key in sorted(set(a_in) | set(b_in)):
+            av = a_in.get(key)
+            bv = b_in.get(key)
+            if av != bv:
                 d = Divergence(
                     cycle_index=i,
                     field=f"effective_input.{key}",
-                    expected=a_in[key],
-                    actual=b_in[key],
+                    expected=av,
+                    actual=bv,
                     kind=INPUT_DIVERGENCE,
                 )
                 result.divergences.append(d)
@@ -128,13 +125,11 @@ def compare_replay_runs(
                 input_mismatch = True
 
         if input_mismatch:
-            # Do not also claim engine inconsistency for this cycle.
             continue
 
         a_beh = _behavior_fields(a)
         b_beh = _behavior_fields(b)
         if setup_ids is not None:
-            # Restrict state comparison to requested setups.
             a_beh["setup_states"] = {
                 k: v for k, v in a_beh["setup_states"].items() if k in setup_ids
             }
@@ -152,13 +147,13 @@ def compare_replay_runs(
                 if k in setup_ids
             }
 
-        for key in a_beh:
-            if a_beh[key] != b_beh[key]:
+        for key in sorted(set(a_beh) | set(b_beh)):
+            if a_beh.get(key) != b_beh.get(key):
                 d = Divergence(
                     cycle_index=i,
                     field=key,
-                    expected=a_beh[key],
-                    actual=b_beh[key],
+                    expected=a_beh.get(key),
+                    actual=b_beh.get(key),
                     kind=ENGINE_DIVERGENCE,
                 )
                 result.divergences.append(d)
@@ -166,5 +161,19 @@ def compare_replay_runs(
                     result.first_divergence = d
                 result.matching = False
                 result.engine_divergence = True
+
+    if len(run_a.cycles) != len(run_b.cycles):
+        d = Divergence(
+            cycle_index=n,
+            field="cycle_count",
+            expected=len(run_a.cycles),
+            actual=len(run_b.cycles),
+            kind=INPUT_DIVERGENCE,
+        )
+        result.divergences.append(d)
+        if result.first_divergence is None:
+            result.first_divergence = d
+        result.matching = False
+        result.input_divergence = True
 
     return result
