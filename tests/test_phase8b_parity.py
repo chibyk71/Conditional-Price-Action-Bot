@@ -1,4 +1,4 @@
-"""Phase 8B R7-R8 / A10-A11: effective-input parity and first-divergence."""
+"""Phase 8B R7–R8 / A10–A11: effective-input parity and first-divergence."""
 
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ def test_identical_runs_match():
 
 
 def test_input_divergence_detected_before_engine():
-    """Injected effective-input difference -> INPUT_DIVERGENCE, not engine claim."""
+    """Injected effective-input difference → INPUT_DIVERGENCE, not engine claim."""
     raw = json.loads((FIXTURES_8A / "phase8a_completion.json").read_text())
     setup = parse_setup(raw)
     candles = _candles(10)
@@ -108,6 +108,7 @@ def test_input_divergence_detected_before_engine():
         arm_count=5,
     )
     a = run_replay(cfg)
+    # Run B with an unhealthy fault so data_ok / readiness differ.
     cfg_b = ReplayRunConfig(
         setups=[setup],
         detectors=[ScriptedDetector({})],
@@ -132,7 +133,7 @@ def test_first_divergence_early_input_before_cycle_count():
     raw = json.loads((FIXTURES_8A / "phase8a_completion.json").read_text())
     setup = parse_setup(raw)
     candles_a = _candles(10)
-    candles_b = _candles(12)
+    candles_b = _candles(12)  # longer series -> more cycles
     cfg_a = ReplayRunConfig(
         setups=[setup],
         detectors=[ScriptedDetector({})],
@@ -151,6 +152,7 @@ def test_first_divergence_early_input_before_cycle_count():
         timeframe_seconds=TF_SEC,
         candles=candles_b,
         arm_count=5,
+        # no fault - diverges on data_ok at cycle 5 AND has more cycles
     )
     a = run_replay(cfg_a)
     b = run_replay(cfg_b)
@@ -199,3 +201,4 @@ def test_first_divergence_pure_length_mismatch():
     assert cmp.first_divergence.field == "cycle_count"
     assert cmp.first_divergence.expected == len(a.cycles)
     assert cmp.first_divergence.actual == len(b.cycles)
+

@@ -396,22 +396,42 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
         )
         by_id = {o.id: o for o in store.all()}
 
-        def _obs_tuple(oid: str):
+        def _obs_identity(oid: str) -> dict:
             obs = by_id.get(oid)
             if obs is None:
-                return (oid, "unknown", None, None, None, {})
-            payload = dict(getattr(obs, "payload", None) or {})
-            return (
-                obs.id,
-                obs.type,
-                getattr(obs, "variant", None),
-                getattr(obs, "candle_epoch", None),
-                getattr(obs, "confirmed_at", None),
-                payload,
-            )
+                return {
+                    "id": oid,
+                    "type": "unknown",
+                    "symbol": None,
+                    "timeframe": None,
+                    "variant": None,
+                    "event_time": None,
+                    "confirmed_at": None,
+                    "candle_epoch": None,
+                    "detected_at": None,
+                    "detector_id": None,
+                    "detector_config_id": None,
+                    "developing": None,
+                    "payload": {},
+                }
+            return {
+                "id": obs.id,
+                "type": obs.type,
+                "symbol": getattr(obs, "symbol", None),
+                "timeframe": getattr(obs, "timeframe", None),
+                "variant": getattr(obs, "variant", None),
+                "event_time": getattr(obs, "event_time", None),
+                "confirmed_at": getattr(obs, "confirmed_at", None),
+                "candle_epoch": getattr(obs, "candle_epoch", None),
+                "detected_at": getattr(obs, "detected_at", None),
+                "detector_id": getattr(obs, "detector_id", None),
+                "detector_config_id": getattr(obs, "detector_config_id", None),
+                "developing": bool(getattr(obs, "developing", False)),
+                "payload": dict(getattr(obs, "payload", None) or {}),
+            }
 
-        accepted_obs = tuple(_obs_tuple(oid) for oid in accepted_ids)
-        emitted_obs = tuple(_obs_tuple(oid) for oid in emitted_ids)
+        accepted_obs = tuple(_obs_identity(oid) for oid in accepted_ids)
+        emitted_obs = tuple(_obs_identity(oid) for oid in emitted_ids)
         sig_ids = tuple(s.id for s in signals)
 
         mon_view = {

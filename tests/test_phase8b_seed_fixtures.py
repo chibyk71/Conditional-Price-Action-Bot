@@ -191,7 +191,9 @@ def test_a6_f2_completion_seed4():
     hl_event_idx = hl_confirm_idx = None
     engine_obs = []
     for rec in r.cycles:
-        for oid, otype, variant, c_epoch, conf_at, *_rest in rec.newly_accepted_observations:
+        for o in rec.newly_accepted_observations:
+            oid, otype, variant = o["id"], o["type"], o.get("variant")
+            c_epoch, conf_at = o.get("candle_epoch"), o.get("confirmed_at")
             engine_obs.append((rec.cycle_index, otype, variant, c_epoch, conf_at))
             if otype == "market_structure" and variant == "hl" and c_epoch is not None:
                 ei = (c_epoch - START) // STEP
@@ -239,7 +241,9 @@ def test_a6_f2_invalidation_seed7():
     ll_event_idx = ll_confirm_idx = None
     engine_obs = []
     for rec in r.cycles:
-        for oid, otype, variant, c_epoch, conf_at, *_rest in rec.newly_accepted_observations:
+        for o in rec.newly_accepted_observations:
+            oid, otype, variant = o["id"], o["type"], o.get("variant")
+            c_epoch, conf_at = o.get("candle_epoch"), o.get("confirmed_at")
             engine_obs.append((rec.cycle_index, otype, variant, c_epoch, conf_at))
             if otype == "market_structure" and variant == "ll" and c_epoch is not None:
                 ei = (c_epoch - START) // STEP
@@ -253,7 +257,9 @@ def test_a6_f2_invalidation_seed7():
         for rec in r.cycles:
             if rec.cycle_index != tc:
                 continue
-            for oid, otype, variant, c_epoch, conf_at, *_rest in rec.newly_accepted_observations:
+            for o in rec.newly_accepted_observations:
+                oid, otype, variant = o["id"], o["type"], o.get("variant")
+                c_epoch, conf_at = o.get("candle_epoch"), o.get("confirmed_at")
                 if otype == "market_structure" and variant == "ll" and c_epoch is not None:
                     ll_event_idx = (c_epoch - START) // STEP
                     ll_confirm_idx = (conf_at - START) // STEP if conf_at is not None else None

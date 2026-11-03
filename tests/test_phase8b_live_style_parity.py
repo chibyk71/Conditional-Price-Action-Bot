@@ -73,6 +73,12 @@ def test_replay_vs_live_style_matching_on_identical_inputs():
         e1: [_obs("zone_interaction", e1, variant="rejection")],
     }
 
+    # Positive A10: equivalent configs declared explicitly on both paths.
+    # Replay completed-only path uses confirm_lag_bars=0 (no lag filter).
+    # Live-style with confirm_lag_bars=0 and large cache yields the same
+    # closed candle set; knobs are recorded identically.
+    CAP = 500
+    LAG = 0
     cfg = ReplayRunConfig(
         setups=[setup],
         detectors=[ScriptedDetector(script)],
@@ -81,6 +87,9 @@ def test_replay_vs_live_style_matching_on_identical_inputs():
         timeframe_seconds=TF_SEC,
         candles=candles,
         arm_count=6,
+        record_confirm_lag_bars=LAG,
+        record_cache_max_size=CAP,
+        record_htf_source=None,
     )
     replay = run_replay(cfg)
     live = run_live_style(
@@ -94,33 +103,24 @@ def test_replay_vs_live_style_matching_on_identical_inputs():
                 candles=candles,
                 arm_count=6,
             ),
-            cache_max_size=500,
-            confirm_lag_bars=1,
+            cache_max_size=CAP,
+            confirm_lag_bars=LAG,
         )
     )
-    cmp = compare_replay_runs(replay, live, setup_ids=[setup.setup_id])
-    # Behavior must match.
-    assert replay.final_setup_states == live.final_setup_states
-    assert [s.id for s in replay.signals] == [s.id for s in live.signals]
     # Effective candle epochs must match (core engine boundary input).
     for a, b in zip(replay.cycles, live.cycles):
         assert a.effective_candle_epochs == b.effective_candle_epochs, (
             a.cycle_index, a.effective_candle_epochs, b.effective_candle_epochs
         )
-    # Live-style must record production knobs; pure replay leaves them None.
-    # INPUT_DIVERGENCE on lag/cache metadata alone is expected and not a failure
-    # of outcome parity — assert no ENGINE_DIVERGENCE.
-    # A10: metadata is always compared. Replay leaves lag/cache None while
-    # live-style records production knobs → INPUT_DIVERGENCE is expected;
-    # outcomes must still match and there must be no ENGINE_DIVERGENCE.
-    cmp2 = compare_replay_runs(replay, live, setup_ids=[setup.setup_id])
-    assert cmp2.input_divergence, cmp2.to_dict()
-    assert not cmp2.engine_divergence, cmp2.to_dict()
-    # Live-style records production knobs.
+    assert replay.final_setup_states == live.final_setup_states
+    assert [s.id for s in replay.signals] == [s.id for s in live.signals]
+    cmp = compare_replay_runs(replay, live, setup_ids=[setup.setup_id])
+    assert cmp.matching and not cmp.input_divergence and not cmp.engine_divergence, cmp.to_dict()
     assert live.cycles[0].monitoring is not None
-    assert live.cycles[0].monitoring.get("confirm_lag_bars") == 1
-    assert live.cycles[0].monitoring.get("cache_max_size") == 500
-    assert live.cycles[0].effective_candle_epochs
+    assert live.cycles[0].monitoring.get("confirm_lag_bars") == LAG
+    assert live.cycles[0].monitoring.get("cache_max_size") == CAP
+    assert replay.cycles[0].monitoring.get("confirm_lag_bars") == LAG
+    assert replay.cycles[0].monitoring.get("cache_max_size") == CAP
 
 
 def test_live_style_cache_cap_affects_effective_inputs():
@@ -336,11 +336,10 @@ def test_live_style_htf_init_then_polling_aggregate():
 
 
 def test_replay_vs_live_style_full_match_on_closed_series():
-    """When all candles are pre-closed and live knobs do not alter the set, engine outcomes match.
+    """A10 positive: equivalent configs produce matching effective inputs, no INPUT_DIVERGENCE.
 
-    Effective-input metadata (confirm_lag, cache_max) may still differ in the
-    comparison record; behavior fields and candle epochs must match. A pure
-    metadata-only INPUT_DIVERGENCE is acceptable; engine_divergence is not.
+    Both paths explicitly record the same confirm_lag_bars and cache_max_size.
+    Live-style lag=0 with large cache yields the same closed set as completed-only replay.
     """
     candles = _candles(15)
     raw = json.loads((FIXTURES_8A / "phase8a_completion.json").read_text())
@@ -350,6 +349,7 @@ def test_replay_vs_live_style_full_match_on_closed_series():
         e0: [_obs("structure_break", e0, variant="bos")],
         e1: [_obs("zone_interaction", e1, variant="rejection")],
     }
+    CAP, LAG = 500, 0
     cfg_kwargs = dict(
         setups=[setup],
         symbol=SYMBOL,
@@ -358,12 +358,20 @@ def test_replay_vs_live_style_full_match_on_closed_series():
         candles=candles,
         arm_count=8,
     )
-    replay = run_replay(ReplayRunConfig(detectors=[ScriptedDetector(script)], **cfg_kwargs))
+    replay = run_replay(
+        ReplayRunConfig(
+            detectors=[ScriptedDetector(script)],
+            record_confirm_lag_bars=LAG,
+            record_cache_max_size=CAP,
+            record_htf_source=None,
+            **cfg_kwargs,
+        )
+    )
     live = run_live_style(
         LiveStyleConfig(
             detectors=[ScriptedDetector(script)],
-            cache_max_size=500,
-            confirm_lag_bars=1,
+            cache_max_size=CAP,
+            confirm_lag_bars=LAG,
             **cfg_kwargs,
         )
     )
@@ -372,12 +380,8 @@ def test_replay_vs_live_style_full_match_on_closed_series():
     for a, b in zip(replay.cycles, live.cycles):
         assert a.effective_candle_epochs == b.effective_candle_epochs
         assert a.setup_states == b.setup_states
-    # A10: no metadata suppression. Input knobs differ (replay vs live) so
-    # INPUT_DIVERGENCE is reported before outcome comparison; engine path must
-    # still match on behavior fields checked above.
     cmp = compare_replay_runs(replay, live, setup_ids=[setup.setup_id])
-    assert cmp.input_divergence, cmp.to_dict()
-    assert not cmp.engine_divergence, cmp.to_dict()
+    assert cmp.matching and not cmp.input_divergence and not cmp.engine_divergence, cmp.to_dict()
 
 
 def test_parity_deliberate_lag_mismatch_reports_input_divergence():
@@ -412,3 +416,149 @@ def test_parity_deliberate_lag_mismatch_reports_input_divergence():
     cmp = compare_replay_runs(a, b)
     assert cmp.input_divergence, cmp.to_dict()
     assert not cmp.matching
+
+
+def test_a10_deliberate_detector_order_mismatch_reports_input_divergence():
+    """Detector order difference must surface as INPUT_DIVERGENCE."""
+    candles = _candles(10)
+    from cpab.detectors.engulfing import EngulfingDetector
+
+    a = run_live_style(
+        LiveStyleConfig(
+            setups=[],
+            detectors=[EngulfingDetector(), ScriptedDetector({})],
+            symbol=SYMBOL,
+            timeframe=TF,
+            timeframe_seconds=TF_SEC,
+            candles=candles,
+            arm_count=5,
+            confirm_lag_bars=0,
+            cache_max_size=100,
+        )
+    )
+    b = run_live_style(
+        LiveStyleConfig(
+            setups=[],
+            detectors=[ScriptedDetector({}), EngulfingDetector()],
+            symbol=SYMBOL,
+            timeframe=TF,
+            timeframe_seconds=TF_SEC,
+            candles=candles,
+            arm_count=5,
+            confirm_lag_bars=0,
+            cache_max_size=100,
+        )
+    )
+    cmp = compare_replay_runs(a, b)
+    assert cmp.input_divergence, cmp.to_dict()
+    assert not cmp.matching
+    assert cmp.first_divergence is not None
+    assert "effective_detector_names" in cmp.first_divergence.field
+
+
+def test_r6_observation_identity_fields_recorded_on_accept():
+    """R6: cycle evidence carries full observation identity + payload."""
+    candles = _candles(12)
+    e0 = candles[5].epoch
+    obs = _obs("structure_break", e0, variant="bos")
+    # enrich identity fields
+    obs = type(obs)(
+        **{
+            **{f.name: getattr(obs, f.name) for f in obs.__dataclass_fields__.values()},  # type: ignore[attr-defined]
+        }
+    ) if False else obs
+    script = {e0: [obs]}
+    raw = json.loads((FIXTURES_8A / "phase8a_completion.json").read_text())
+    # use a simple expression requiring structure_break only via invalidation path
+    # Prefer direct accept via any setup that matches - use phase8a completion's first step indirectly
+    # by injecting both steps on consecutive bars.
+    e1 = candles[6].epoch
+    script = {
+        e0: [_obs("structure_break", e0, variant="bos")],
+        e1: [_obs("zone_interaction", e1, variant="rejection")],
+    }
+    setup = parse_setup(raw)
+    r = run_replay(
+        ReplayRunConfig(
+            setups=[setup],
+            detectors=[ScriptedDetector(script)],
+            symbol=SYMBOL,
+            timeframe=TF,
+            timeframe_seconds=TF_SEC,
+            candles=candles,
+            arm_count=6,
+        )
+    )
+    # Find a cycle with newly accepted observations
+    found = False
+    required_keys = {
+        "id", "type", "symbol", "timeframe", "variant", "event_time",
+        "confirmed_at", "candle_epoch", "detected_at", "detector_id",
+        "detector_config_id", "developing", "payload",
+    }
+    for rec in r.cycles:
+        for entry in rec.newly_accepted_observations:
+            found = True
+            assert required_keys <= set(entry.keys()), entry.keys()
+            assert entry["id"]
+            assert entry["type"]
+            assert entry["symbol"] == SYMBOL
+            assert entry["timeframe"] == TF
+            assert isinstance(entry["payload"], dict)
+        for entry in rec.emitted_observations:
+            assert required_keys <= set(entry.keys()), entry.keys()
+    assert found, "expected at least one newly accepted observation in cycle evidence"
+
+
+def test_r6_identity_field_difference_visible_in_cycle_evidence():
+    """R6: changing observation identity fields changes recorded cycle evidence."""
+    candles = _candles(8)
+    e0 = candles[4].epoch
+
+    def _run(detector_id: str):
+        o = Observation(
+            id=f"structure_break_bos_{e0}_{detector_id}",
+            type="structure_break",
+            symbol=SYMBOL,
+            timeframe=TF,
+            candle_epoch=e0,
+            event_time=e0,
+            confirmed_at=e0,
+            detected_at=float(e0),
+            developing=False,
+            variant="bos",
+            detector_id=detector_id,
+            detector_config_id=f"{detector_id}_cfg",
+            payload={"marker": detector_id},
+        )
+        # Minimal setup that accepts structure_break/bos as completion via expression of type only
+        from cpab.conditions.validation import parse_setup as _ps
+        setup = _ps({
+            "schema_version": 1,
+            "setup_id": f"id_{detector_id}",
+            "symbol": SYMBOL,
+            "timeframe": TF,
+            "enabled": True,
+            "expression": {"type": "structure_break", "variant": "bos", "min_count": 1},
+        })
+        return run_replay(
+            ReplayRunConfig(
+                setups=[setup],
+                detectors=[ScriptedDetector({e0: [o]})],
+                symbol=SYMBOL,
+                timeframe=TF,
+                timeframe_seconds=TF_SEC,
+                candles=candles,
+                arm_count=5,
+            )
+        )
+
+    a = _run("det_a")
+    b = _run("det_b")
+    a_entries = [e for rec in a.cycles for e in rec.newly_accepted_observations]
+    b_entries = [e for rec in b.cycles for e in rec.newly_accepted_observations]
+    assert a_entries and b_entries
+    assert a_entries[0]["detector_id"] != b_entries[0]["detector_id"]
+    assert a_entries[0]["payload"] != b_entries[0]["payload"]
+    assert a_entries[0]["id"] != b_entries[0]["id"]
+

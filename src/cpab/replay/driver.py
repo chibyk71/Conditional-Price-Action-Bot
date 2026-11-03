@@ -34,6 +34,13 @@ class ReplayRunConfig:
     # Optional per-cycle overrides keyed by evaluation cycle index (0 = first evaluate).
     # Values: {"series_healthy": bool} | {"readiness_ready": bool} | {"skip_candle": True}
     fault_schedule: dict[int, dict[str, Any]] = field(default_factory=dict)
+    # Effective-input annotations recorded on every cycle for A10 parity.
+    # Defaults describe the completed-only replay path (no lag filter, no cache
+    # trim, no HTF). Callers must set these explicitly when claiming equivalence
+    # with a live-style configuration. They do not change evaluation behaviour.
+    record_confirm_lag_bars: int = 0
+    record_cache_max_size: Optional[int] = None  # None = unlimited (no trim)
+    record_htf_source: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -62,14 +69,12 @@ class CycleRecord:
     effective_candle_ohlcs: tuple[tuple[int, float, float, float, float, float], ...] = ()
     effective_detector_names: tuple[str, ...] = ()
     injected_fault: Optional[str] = None
-    # R6: full identity + payload for emitted and newly accepted observations.
-    # Each entry: (id, type, variant, candle_epoch, confirmed_at, payload_dict)
-    newly_accepted_observations: tuple[
-        tuple[str, str, Optional[str], Optional[int], Optional[int], dict], ...
-    ] = ()
-    emitted_observations: tuple[
-        tuple[str, str, Optional[str], Optional[int], Optional[int], dict], ...
-    ] = ()
+    # R6: full observation identity + payload for emitted and newly accepted.
+    # Each entry is a dict with: id, type, symbol, timeframe, variant, event_time,
+    # confirmed_at, candle_epoch, detected_at, detector_id, detector_config_id,
+    # developing, payload. Ordering is deterministic (ids order from monitoring).
+    newly_accepted_observations: tuple[dict[str, Any], ...] = ()
+    emitted_observations: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass
@@ -362,22 +367,43 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
         sig_ids = tuple(s.id for s in signals)
         by_id = {o.id: o for o in store.all()}
 
-        def _obs_tuple(oid: str) -> tuple[str, str, Optional[str], Optional[int], Optional[int], dict]:
+        def _obs_identity(oid: str) -> dict[str, Any]:
+            """R6: complete observation identity + payload (no engine mutation)."""
             obs = by_id.get(oid)
             if obs is None:
-                return (oid, "unknown", None, None, None, {})
-            payload = dict(getattr(obs, "payload", None) or {})
-            return (
-                obs.id,
-                obs.type,
-                getattr(obs, "variant", None),
-                getattr(obs, "candle_epoch", None),
-                getattr(obs, "confirmed_at", None),
-                payload,
-            )
+                return {
+                    "id": oid,
+                    "type": "unknown",
+                    "symbol": None,
+                    "timeframe": None,
+                    "variant": None,
+                    "event_time": None,
+                    "confirmed_at": None,
+                    "candle_epoch": None,
+                    "detected_at": None,
+                    "detector_id": None,
+                    "detector_config_id": None,
+                    "developing": None,
+                    "payload": {},
+                }
+            return {
+                "id": obs.id,
+                "type": obs.type,
+                "symbol": getattr(obs, "symbol", None),
+                "timeframe": getattr(obs, "timeframe", None),
+                "variant": getattr(obs, "variant", None),
+                "event_time": getattr(obs, "event_time", None),
+                "confirmed_at": getattr(obs, "confirmed_at", None),
+                "candle_epoch": getattr(obs, "candle_epoch", None),
+                "detected_at": getattr(obs, "detected_at", None),
+                "detector_id": getattr(obs, "detector_id", None),
+                "detector_config_id": getattr(obs, "detector_config_id", None),
+                "developing": bool(getattr(obs, "developing", False)),
+                "payload": dict(getattr(obs, "payload", None) or {}),
+            }
 
-        accepted_obs = [_obs_tuple(oid) for oid in accepted_ids]
-        emitted_obs = [_obs_tuple(oid) for oid in emitted_ids]
+        accepted_obs = [_obs_identity(oid) for oid in accepted_ids]
+        emitted_obs = [_obs_identity(oid) for oid in emitted_ids]
 
         # R6: full monitoring view (series / setups / readiness), not only blocked + signal count.
         mon_view: dict[str, Any]
@@ -431,6 +457,14 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
                 "detector_emitted_observation_ids": emitted_ids,
                 "newly_accepted_observation_ids": accepted_ids,
             }
+
+        # A10: always record effective-input annotations (explicit; never suppressed).
+        mon_view["confirm_lag_bars"] = config.record_confirm_lag_bars
+        mon_view["cache_max_size"] = config.record_cache_max_size
+        mon_view["htf_source"] = config.record_htf_source
+        mon_view.setdefault("htf_epochs", ())
+        mon_view.setdefault("htf_ohlcs", ())
+        mon_view["completed_count"] = len(visible)
 
         rec = CycleRecord(
             cycle_index=cycle_idx,

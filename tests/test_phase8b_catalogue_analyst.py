@@ -25,13 +25,75 @@ from cpab.conditions.validation import SetupValidationError, parse_setup
 DOCS = Path(__file__).resolve().parents[1] / "docs" / "PHASE8A_SETUP_CATALOGUE.md"
 
 
+
+# Independent expected analyst allowlist from Phase 8B contract Rev 9 section L3.
+# Defined here in the test module — not imported from or generated from the
+# implementation allowlist — so drift fails closed.
+_EXPECTED_ANALYST_ALLOWLIST_33: frozenset[tuple[str, str | None]] = frozenset(
+    {
+        ("bullish_engulfing", None),
+        ("bearish_engulfing", None),
+        ("bullish_impulse", "atr_normalized_candle_v1"),
+        ("bearish_impulse", "atr_normalized_candle_v1"),
+        ("market_structure", "hh"),
+        ("market_structure", "hl"),
+        ("market_structure", "lh"),
+        ("market_structure", "ll"),
+        ("order_block", "bullish"),
+        ("order_block", "bearish"),
+        ("breaker_block", "bullish_to_bearish"),
+        ("breaker_block", "bearish_to_bullish"),
+        ("fair_value_gap", "bullish"),
+        ("fair_value_gap", "bearish"),
+        ("inverse_fair_value_gap", "bullish_to_bearish"),
+        ("inverse_fair_value_gap", "bearish_to_bullish"),
+        ("zone_polarity_flip", "support_to_resistance"),
+        ("zone_polarity_flip", "resistance_to_support"),
+        ("swing_high", "pivot_lr"),
+        ("swing_low", "pivot_lr"),
+        ("support_resistance_zone", "support"),
+        ("support_resistance_zone", "resistance"),
+        ("equal_high_level", "equal_abs"),
+        ("equal_low_level", "equal_abs"),
+        ("equal_high_level_touch", "equal_abs"),
+        ("equal_low_level_touch", "equal_abs"),
+        ("atr_expansion", "rolling_atr_v1"),
+        ("atr_contraction", "rolling_atr_v1"),
+        ("range_expansion", "true_range_v1"),
+        ("double_top", "swing_based_v1"),
+        ("double_bottom", "swing_based_v1"),
+        ("head_and_shoulders", "swing_based_v1"),
+        ("inverse_head_and_shoulders", "swing_based_v1"),
+    }
+)
+assert len(_EXPECTED_ANALYST_ALLOWLIST_33) == 33
+
+
 def test_allowlist_has_exactly_33_pairs():
     assert len(ANALYST_ALLOWLIST) == 33
+    assert len(_EXPECTED_ANALYST_ALLOWLIST_33) == 33
+
+
+def test_allowlist_exact_set_equality_with_contract_l3():
+    """A3: implementation allowlist must equal the independent contract L3 set.
+
+    Missing, extra, duplicate or incorrectly variant-qualified entries fail.
+    Expected set is defined in this test module, not generated from implementation.
+    """
+    impl = frozenset(ANALYST_ALLOWLIST)
+    expected = _EXPECTED_ANALYST_ALLOWLIST_33
+    missing = expected - impl
+    extra = impl - expected
+    assert not missing, f"A3 allowlist missing pairs: {sorted(missing)}"
+    assert not extra, f"A3 allowlist extra pairs: {sorted(extra)}"
+    assert impl == expected
 
 
 def test_allowlist_is_subset_of_catalogue():
     for t, v in ANALYST_ALLOWLIST:
         assert is_catalogue_pair(t, v), f"allowlist pair ({t}, {v}) not in catalogue"
+    for t, v in _EXPECTED_ANALYST_ALLOWLIST_33:
+        assert is_catalogue_pair(t, v), f"expected pair ({t}, {v}) not in catalogue"
 
 
 def test_analyst_timeframes_exactly_nine():
@@ -231,6 +293,7 @@ def test_doc_catalogue_matches_code_both_directions():
     )
 
     assert len(ANALYST_ALLOWLIST) == 33
+    assert frozenset(ANALYST_ALLOWLIST) == _EXPECTED_ANALYST_ALLOWLIST_33
     for t, v in ANALYST_ALLOWLIST:
         assert t in CATALOGUE, f"allowlist type {t} not in catalogue"
         assert is_catalogue_pair(t, v), f"allowlist pair ({t}, {v}) not valid"
