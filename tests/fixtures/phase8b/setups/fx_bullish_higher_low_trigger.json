@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "setup_id": "fx_bullish_higher_low_trigger",
+  "symbol": "stpRNG",
+  "timeframe": "15m",
+  "enabled": true,
+  "name": "Higher low plus bullish trigger",
+  "description": "A confirmed higher low and a bullish engulfing-or-impulse candle.",
+  "expression": {
+    "op": "and",
+    "children": [
+      {
+        "type": "market_structure",
+        "variant": "hl"
+      },
+      {
+        "op": "or",
+        "children": [
+          {
+            "type": "bullish_engulfing"
+          },
+          {
+            "type": "bullish_impulse"
+          }
+        ]
+      }
+    ]
+  },
+  "invalidation": {
+    "type": "market_structure",
+    "variant": "ll"
+  },
+  "expiry": {
+    "max_age_candles": 60
+  }
+}

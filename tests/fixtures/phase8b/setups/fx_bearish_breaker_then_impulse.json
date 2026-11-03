@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "setup_id": "fx_bearish_breaker_then_impulse",
+  "symbol": "stpRNG",
+  "timeframe": "15m",
+  "enabled": true,
+  "name": "Bearish breaker then bearish impulse",
+  "description": "Bullish order block fails (bearish breaker), then a bearish impulse candle confirms momentum.",
+  "expression": {
+    "op": "then",
+    "steps": [
+      {
+        "type": "breaker_block",
+        "variant": "bullish_to_bearish"
+      },
+      {
+        "type": "bearish_impulse"
+      }
+    ]
+  },
+  "invalidation": {
+    "type": "breaker_block",
+    "variant": "bearish_to_bullish"
+  },
+  "expiry": {
+    "max_age_candles": 80
+  }
+}
