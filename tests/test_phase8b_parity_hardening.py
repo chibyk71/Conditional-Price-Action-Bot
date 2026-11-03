@@ -157,8 +157,9 @@ def test_b1_pytest_sessionstart_survives_git_failure(monkeypatch, tmp_path):
 def test_b2_missing_vs_known_metadata_diverges():
     """Missing metadata never equals known values (fail closed).
 
-    Both sides omitting the same key yields MISSING==MISSING (equal). The defect
-    under review was inventing defaults so a missing side matched a known side.
+    A required field represented by MISSING on one side and a known value on
+    the other produces INPUT_DIVERGENCE. (MISSING vs MISSING is also divergence;
+    see test_b2_both_sides_missing_fail_closed.)
     """
     known = {
         "confirm_lag_bars": 1,

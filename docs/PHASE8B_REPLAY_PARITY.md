@@ -1,6 +1,7 @@
 # Phase 8B — Replay, Parity, and Watch-List Confidence
 
-Contract: `docs/PHASE_8B_CONTRACT_REV8.md` (revision 8).
+Contract: `docs/PHASE_8B_CONTRACT_REV9.md` (Revision 9, approved).
+Contract content SHA-256: `967bcd1150a02bd22c61b84a523a806add8ec90e1c4b302ff1ede513d4b7ab87`.
 
 ## Scope
 
