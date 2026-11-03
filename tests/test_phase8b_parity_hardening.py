@@ -178,12 +178,18 @@ def test_b2_missing_vs_known_metadata_diverges():
     assert MISSING in (cmp.first_divergence.expected, cmp.first_divergence.actual)
 
 
-def test_b2_both_sides_same_missing_are_equal_for_that_key():
+def test_b2_both_sides_missing_fail_closed():
+    """MISSING vs MISSING is INPUT_DIVERGENCE — absence is not proof of match."""
     a = _result([_empty_rec(5, monitoring=None)])
     b = _result([_empty_rec(5, monitoring=None)])
     cmp = compare_replay_runs(a, b)
-    # Identical omissions + identical candle defaults → matching
-    assert cmp.matching
+    assert not cmp.matching
+    assert cmp.input_divergence
+    assert cmp.first_divergence is not None
+    assert cmp.first_divergence.kind == INPUT_DIVERGENCE
+    assert "effective_input." in cmp.first_divergence.field
+    assert cmp.first_divergence.expected == MISSING
+    assert cmp.first_divergence.actual == MISSING
 
 
 def test_b2_htf_none_not_equal_empty_tuple():

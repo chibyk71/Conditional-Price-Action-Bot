@@ -42,6 +42,25 @@ Module: `cpab.replay`
 - `compare_replay_runs` — effective inputs first; `INPUT_DIVERGENCE` vs engine
 - `classify_stalled` — report-only; readiness-blocked cycles excluded
 
+## Live-style harness limitations (C4)
+
+The live-style path (`run_live_style`) models **cache capacity** and
+**candle-closure marking** via production `CandleCache` and
+`mark_closed_by_lag`.
+
+It does **not** model lag-based withholding of recent candles as a distinct
+visibility window under production server-time progression. Therefore:
+
+- lag 0 / 1 / 3 results from the live-style harness must **not** be interpreted
+  as demonstrating different recent-candle visibility under those lag settings;
+- lag-based withholding has **not** been tested through `run_live_style`;
+- unit-level checks of `mark_closed_by_lag` remain valid for closure marking
+  alone and are not a substitute for full lag-withholding parity under live-style.
+
+Positive replay/live-style parity claims apply only to configurations where
+both paths record equivalent effective inputs that the harness can actually
+represent (cache caps, annotated lag knobs, pre-closed series, HTF source labels).
+
 ## STALLED (report-only)
 
 Not a lifecycle state. Continuity policy is unchanged.

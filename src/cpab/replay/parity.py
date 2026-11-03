@@ -71,7 +71,9 @@ def _mon_get(mon: dict[str, Any] | None, key: str) -> Any:
 def _effective_inputs(rec: CycleRecord) -> dict[str, Any]:
     """A10: always record and compare effective inputs. No metadata suppression.
 
-    Missing metadata (MISSING) never equals known or empty values.
+    Missing metadata (MISSING) never equals known values, empty values,
+    or another MISSING. Absence of evidence on both sides is not proof of
+    matching inputs — both-side MISSING is INPUT_DIVERGENCE.
     Explicit None, empty tuple (), and populated sequences are distinct.
     """
     mon = rec.monitoring if isinstance(rec.monitoring, dict) else None
@@ -160,7 +162,10 @@ def compare_replay_runs(
         for key in sorted(set(a_in) | set(b_in) | set(_REQUIRED_INPUT_KEYS)):
             av = a_in.get(key, MISSING)
             bv = b_in.get(key, MISSING)
-            if av != bv:
+            # Fail closed: any MISSING on either side is INPUT_DIVERGENCE,
+            # including MISSING vs MISSING. Equal present values may match.
+            missing_either = av is MISSING or bv is MISSING or av == MISSING or bv == MISSING
+            if missing_either or av != bv:
                 d = Divergence(
                     cycle_index=reported_idx,
                     field=f"effective_input.{key}",
