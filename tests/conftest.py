@@ -61,8 +61,20 @@ def sample_1m() -> list[Candle]:
 
 
 def pytest_sessionstart(session):
-    """A15: Phase 8B evidence from this run only. Fail closed on identity errors."""
+    """A15: best-effort Phase 8B evidence bootstrap.
+
+    Must not raise on missing Git or environment metadata so ordinary pytest
+    works outside a checkout. Acceptance/meta tests still fail closed via
+    validate_run_identity when mandatory evidence cannot be established.
+    """
     from cpab.replay.evidence import begin_acceptance_run
 
     pytest_args = list(sys.argv)
-    begin_acceptance_run(note="pytest_sessionstart", pytest_args=pytest_args)
+    try:
+        begin_acceptance_run(note="pytest_sessionstart", pytest_args=pytest_args)
+    except Exception as exc:  # noqa: BLE001 — session must always start
+        # Record a minimal unavailable run so meta-tests fail closed, not INTERNALERROR.
+        try:
+            begin_acceptance_run(note=f"pytest_sessionstart_error:{type(exc).__name__}", pytest_args=pytest_args or ["pytest"])
+        except Exception:
+            pass

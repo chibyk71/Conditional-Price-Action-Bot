@@ -16,6 +16,48 @@ from cpab.market.readiness import ReadinessManager
 from cpab.models import Candle, Observation, ReadinessState, Signal
 
 
+def detector_fingerprint(det: Any) -> str:
+    """Deterministic detector identity+config for parity (C1).
+
+    Prefer detector_config_id / config_dict when available; never use id()/repr
+    of mutable state. Order is preserved by the caller.
+    """
+    name = getattr(det, "name", None) or type(det).__name__
+    cfg_id = getattr(det, "detector_config_id", None)
+    if callable(cfg_id):
+        try:
+            cfg_id = cfg_id()
+        except Exception:
+            cfg_id = None
+    if cfg_id:
+        return f"{name}|{cfg_id}"
+    cfg = getattr(det, "config_dict", None)
+    if callable(cfg):
+        try:
+            d = cfg()
+            if isinstance(d, dict):
+                parts = ",".join(f"{k}={d[k]}" for k in sorted(d))
+                return f"{name}|{parts}"
+        except Exception:
+            pass
+    # Stable attribute subset for detectors without formal config_id
+    parts: list[str] = []
+    for attr in (
+        "left_strength",
+        "right_strength",
+        "tie_policy",
+        "min_body_ratio",
+        "lookback",
+        "period",
+    ):
+        if hasattr(det, attr):
+            parts.append(f"{attr}={getattr(det, attr)}")
+    if parts:
+        return f"{name}|{','.join(parts)}"
+    return str(name)
+
+
+
 @dataclass
 class ReplayRunConfig:
     """Configuration for one independent replay run."""
@@ -68,6 +110,7 @@ class CycleRecord:
     # Engine-boundary candles: (epoch, o, h, l, c, is_closed_as_float).
     effective_candle_ohlcs: tuple[tuple[int, float, float, float, float, float], ...] = ()
     effective_detector_names: tuple[str, ...] = ()
+    effective_detector_configs: tuple[str, ...] = ()
     injected_fault: Optional[str] = None
     # R6: full observation identity + payload for emitted and newly accepted.
     # Each entry is a dict with: id, type, symbol, timeframe, variant, event_time,
@@ -234,6 +277,7 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
     detector_names = tuple(
         getattr(d, "name", type(d).__name__) for d in detectors
     )
+    detector_configs = tuple(detector_fingerprint(d) for d in detectors)
     # Epochs omitted by missing-candle faults stay omitted for the rest of the
     # run (A14: no backfill / no gap repair). Later candles still arrive.
     omitted_epochs: set[int] = set()
@@ -492,6 +536,7 @@ def run_replay(config: ReplayRunConfig) -> ReplayResult:
                 for c in visible
             ),
             effective_detector_names=detector_names,
+            effective_detector_configs=detector_configs,
             injected_fault=injected,
         )
         cycles.append(rec)

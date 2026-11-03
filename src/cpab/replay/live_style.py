@@ -19,7 +19,7 @@ from cpab.market.cache import CandleCache
 from cpab.market.readiness import ReadinessManager
 from cpab.market.validation import mark_closed_by_lag
 from cpab.models import Candle, ReadinessState, Signal
-from cpab.replay.driver import CycleRecord, ReplayResult, ReplayRunConfig
+from cpab.replay.driver import CycleRecord, ReplayResult, ReplayRunConfig, detector_fingerprint
 
 
 @dataclass
@@ -173,6 +173,7 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
     detector_names = tuple(
         getattr(d, "name", type(d).__name__) for d in config.detectors
     )
+    detector_configs = tuple(detector_fingerprint(d) for d in config.detectors)
 
     cycles: list[CycleRecord] = []
     all_signals: list[Signal] = []
@@ -320,9 +321,9 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
         blocked = bool(mon.evaluation_blocked) if mon is not None else False
         if not readiness_ready:
             blocked = True
-            lc_calls = 0
-        else:
-            lc_calls = 1
+        # Count actual evaluation path: blocked cycles must report 0 lifecycle calls
+        # (aligned with driver.py / ConditionEngine behaviour under readiness recovery).
+        lc_calls = 0 if blocked else 1
         lifecycle_calls.append(lc_calls)
 
         completed = primary.completed()
@@ -509,6 +510,7 @@ def run_live_style(config: LiveStyleConfig) -> ReplayResult:
                 for c in completed
             ),
             effective_detector_names=detector_names,
+            effective_detector_configs=detector_configs,
             injected_fault=injected,
         )
         cycles.append(rec)

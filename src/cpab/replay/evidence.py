@@ -68,25 +68,40 @@ def current_run_id() -> str | None:
 
 
 def _git_commit() -> str:
-    out = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
-    ).strip()
+    """Return 40-hex HEAD, or 'unknown' when Git metadata is unavailable.
+
+    Must not raise: ordinary pytest outside a checkout must still collect/run.
+    A15 validate_run_identity still fails closed on non-hex commit.
+    """
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except (OSError, subprocess.CalledProcessError, FileNotFoundError):
+        return "unknown"
     if not _COMMIT_RE.match(out):
-        raise RuntimeError(f"A15: git rev-parse HEAD is not 40-hex: {out!r}")
+        return "unknown"
     return out
 
 
 def _git_porcelain() -> str:
-    return subprocess.check_output(
-        ["git", "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
-    )
+    """Return porcelain status, or a sentinel when Git is unavailable."""
+    try:
+        return subprocess.check_output(
+            ["git", "status", "--porcelain"], text=True, stderr=subprocess.DEVNULL
+        )
+    except (OSError, subprocess.CalledProcessError, FileNotFoundError):
+        return "__git_unavailable__\n"
 
 
 def _dependency_set_hash() -> str:
-    """SHA-256 of sorted pip freeze lines (deterministic)."""
-    raw = subprocess.check_output(
-        ["pip", "freeze"], text=True, stderr=subprocess.DEVNULL
-    )
+    """SHA-256 of sorted pip freeze lines, or 'unavailable' on failure."""
+    try:
+        raw = subprocess.check_output(
+            ["pip", "freeze"], text=True, stderr=subprocess.DEVNULL
+        )
+    except (OSError, subprocess.CalledProcessError, FileNotFoundError):
+        return "unavailable"
     lines = sorted(line.strip() for line in raw.splitlines() if line.strip())
     payload = "\n".join(lines) + ("\n" if lines else "")
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -100,19 +115,16 @@ def begin_acceptance_run(
     """Start a fresh A15 run. Commit is always git rev-parse HEAD (no override)."""
     global _CURRENT_RUN_ID
 
+    # Collect metadata safely. Missing Git does not abort ordinary pytest.
+    # A15 validate_run_identity still fails closed when commit is not 40-hex.
     resolved_commit = _git_commit()
-    if resolved_commit == "unknown" or not _COMMIT_RE.match(resolved_commit):
-        raise RuntimeError(
-            f"A15: commit identity must be exact 40-hex SHA; got {resolved_commit!r}"
-        )
 
     if pytest_args is None or not isinstance(pytest_args, list) or len(pytest_args) == 0:
-        raise RuntimeError(
-            f"A15: pytest_args must be a non-empty list of actual invocation arguments; got {pytest_args!r}"
-        )
+        # Soft-fail for sessionstart portability: record empty args; A15 gate rejects.
+        pytest_args = list(pytest_args) if isinstance(pytest_args, list) else []
 
     porcelain = _git_porcelain()
-    clean = porcelain.strip() == ""
+    clean = porcelain.strip() == "" and not porcelain.startswith("__git_unavailable__")
     dep_hash = _dependency_set_hash()
 
     talib_meta: dict[str, Any] = {}

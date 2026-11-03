@@ -10,6 +10,10 @@ from cpab.replay.driver import CycleRecord, ReplayResult
 INPUT_DIVERGENCE = "INPUT_DIVERGENCE"
 ENGINE_DIVERGENCE = "ENGINE_DIVERGENCE"
 
+# Sentinel: required effective-input metadata was never recorded.
+# Distinct from explicit None and from an empty sequence.
+MISSING: str = "__MISSING__"
+
 
 @dataclass
 class Divergence:
@@ -40,34 +44,59 @@ class ParityComparison:
         }
 
 
+_REQUIRED_INPUT_KEYS: tuple[str, ...] = (
+    "effective_candle_epochs",
+    "effective_candle_ohlcs",
+    "effective_detector_names",
+    "effective_detector_configs",
+    "data_ok",
+    "readiness_state",
+    "evaluation_blocked",
+    "confirm_lag_bars",
+    "cache_max_size",
+    "htf_epochs",
+    "htf_source",
+    "htf_ohlcs",
+    "completed_count",
+)
+
+
+def _mon_get(mon: dict[str, Any] | None, key: str) -> Any:
+    """Return recorded value or MISSING. Never invent defaults."""
+    if mon is None or key not in mon:
+        return MISSING
+    return mon[key]
+
+
 def _effective_inputs(rec: CycleRecord) -> dict[str, Any]:
     """A10: always record and compare effective inputs. No metadata suppression.
 
-    Compared fields (contract):
-    - candles actually visible after window/cache (epochs + OHLC)
-    - confirmation-lag / closed-candle settings (confirm_lag_bars)
-    - cache / evaluation configuration (cache_max_size, completed_count)
-    - HTF source and construction (htf_source, htf_epochs, htf_ohlcs)
-    - readiness and health (readiness_state, data_ok, evaluation_blocked)
-    - detector identities and order (effective_detector_names)
-
-    Missing metadata is never treated as equal to a known value: both sides
-    must record these keys explicitly for a successful match.
+    Missing metadata (MISSING) never equals known or empty values.
+    Explicit None, empty tuple (), and populated sequences are distinct.
     """
-    mon = rec.monitoring or {}
+    mon = rec.monitoring if isinstance(rec.monitoring, dict) else None
     return {
-        "effective_candle_epochs": rec.effective_candle_epochs,
-        "effective_candle_ohlcs": rec.effective_candle_ohlcs,
-        "effective_detector_names": rec.effective_detector_names,
+        "effective_candle_epochs": rec.effective_candle_epochs
+        if rec.effective_candle_epochs is not None
+        else MISSING,
+        "effective_candle_ohlcs": rec.effective_candle_ohlcs
+        if rec.effective_candle_ohlcs is not None
+        else MISSING,
+        "effective_detector_names": rec.effective_detector_names
+        if rec.effective_detector_names is not None
+        else MISSING,
+        "effective_detector_configs": getattr(rec, "effective_detector_configs", ())
+        if getattr(rec, "effective_detector_configs", None) is not None
+        else MISSING,
         "data_ok": rec.data_ok,
         "readiness_state": rec.readiness_state,
         "evaluation_blocked": rec.evaluation_blocked,
-        "confirm_lag_bars": mon.get("confirm_lag_bars"),
-        "cache_max_size": mon.get("cache_max_size"),
-        "htf_epochs": mon.get("htf_epochs"),
-        "htf_source": mon.get("htf_source"),
-        "htf_ohlcs": mon.get("htf_ohlcs") if mon.get("htf_ohlcs") is not None else (),
-        "completed_count": mon.get("completed_count"),
+        "confirm_lag_bars": _mon_get(mon, "confirm_lag_bars"),
+        "cache_max_size": _mon_get(mon, "cache_max_size"),
+        "htf_epochs": _mon_get(mon, "htf_epochs"),
+        "htf_source": _mon_get(mon, "htf_source"),
+        "htf_ohlcs": _mon_get(mon, "htf_ohlcs"),
+        "completed_count": _mon_get(mon, "completed_count"),
     }
 
 
@@ -81,6 +110,11 @@ def _behavior_fields(rec: CycleRecord) -> dict[str, Any]:
     }
 
 
+def _report_cycle_index(a: CycleRecord, b: CycleRecord) -> int:
+    """Prefer the left-run actual CycleRecord.cycle_index (not list position)."""
+    return int(a.cycle_index)
+
+
 def compare_replay_runs(
     run_a: ReplayResult,
     run_b: ReplayResult,
@@ -90,12 +124,11 @@ def compare_replay_runs(
     """Compare two independent runs cycle-by-cycle.
 
     Ordering rule (first-divergence):
-    1. Walk the common cycle range in chronological order.
-    2. Report the earliest actual divergence by cycle index and field.
+    1. Walk the common cycle range in chronological (list) order.
+    2. Report the earliest actual divergence by CycleRecord.cycle_index and field.
     3. Only report a cycle-count / length mismatch if no earlier divergence exists.
 
-    Effective inputs are always compared before outcomes. Any input mismatch is
-    INPUT_DIVERGENCE and prevents an ENGINE_DIVERGENCE claim for that cycle.
+    Missing required effective-input metadata is INPUT_DIVERGENCE (fail closed).
     """
     result = ParityComparison(matching=True)
     n = min(len(run_a.cycles), len(run_b.cycles))
@@ -103,15 +136,33 @@ def compare_replay_runs(
     for i in range(n):
         a = run_a.cycles[i]
         b = run_b.cycles[i]
+        reported_idx = _report_cycle_index(a, b)
+
+        # Actual cycle-index identity difference is itself an input divergence.
+        if a.cycle_index != b.cycle_index:
+            d = Divergence(
+                cycle_index=reported_idx,
+                field="cycle_index",
+                expected=a.cycle_index,
+                actual=b.cycle_index,
+                kind=INPUT_DIVERGENCE,
+            )
+            result.divergences.append(d)
+            if result.first_divergence is None:
+                result.first_divergence = d
+            result.matching = False
+            result.input_divergence = True
+            continue
+
         a_in = _effective_inputs(a)
         b_in = _effective_inputs(b)
         input_mismatch = False
-        for key in sorted(set(a_in) | set(b_in)):
-            av = a_in.get(key)
-            bv = b_in.get(key)
+        for key in sorted(set(a_in) | set(b_in) | set(_REQUIRED_INPUT_KEYS)):
+            av = a_in.get(key, MISSING)
+            bv = b_in.get(key, MISSING)
             if av != bv:
                 d = Divergence(
-                    cycle_index=i,
+                    cycle_index=reported_idx,
                     field=f"effective_input.{key}",
                     expected=av,
                     actual=bv,
@@ -150,7 +201,7 @@ def compare_replay_runs(
         for key in sorted(set(a_beh) | set(b_beh)):
             if a_beh.get(key) != b_beh.get(key):
                 d = Divergence(
-                    cycle_index=i,
+                    cycle_index=reported_idx,
                     field=key,
                     expected=a_beh.get(key),
                     actual=b_beh.get(key),
@@ -163,17 +214,40 @@ def compare_replay_runs(
                 result.engine_divergence = True
 
     if len(run_a.cycles) != len(run_b.cycles):
-        d = Divergence(
-            cycle_index=n,
-            field="cycle_count",
-            expected=len(run_a.cycles),
-            actual=len(run_b.cycles),
-            kind=INPUT_DIVERGENCE,
-        )
-        result.divergences.append(d)
+        # Only if no earlier divergence
         if result.first_divergence is None:
+            # Use last common cycle's index + 1 when available; else n
+            if n > 0:
+                idx = max(run_a.cycles[n - 1].cycle_index, run_b.cycles[n - 1].cycle_index) + 1
+            else:
+                idx = 0
+            d = Divergence(
+                cycle_index=idx,
+                field="cycle_count",
+                expected=len(run_a.cycles),
+                actual=len(run_b.cycles),
+                kind=INPUT_DIVERGENCE,
+            )
+            result.divergences.append(d)
             result.first_divergence = d
-        result.matching = False
-        result.input_divergence = True
+            result.matching = False
+            result.input_divergence = True
+        else:
+            # Still record length mismatch but do not replace first_divergence
+            if n > 0:
+                idx = max(run_a.cycles[n - 1].cycle_index, run_b.cycles[n - 1].cycle_index) + 1
+            else:
+                idx = 0
+            result.divergences.append(
+                Divergence(
+                    cycle_index=idx,
+                    field="cycle_count",
+                    expected=len(run_a.cycles),
+                    actual=len(run_b.cycles),
+                    kind=INPUT_DIVERGENCE,
+                )
+            )
+            result.matching = False
+            result.input_divergence = True
 
     return result

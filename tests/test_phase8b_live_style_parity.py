@@ -453,30 +453,47 @@ def test_a10_deliberate_detector_order_mismatch_reports_input_divergence():
     assert cmp.input_divergence, cmp.to_dict()
     assert not cmp.matching
     assert cmp.first_divergence is not None
-    assert "effective_detector_names" in cmp.first_divergence.field
+    assert ("effective_detector_names" in cmp.first_divergence.field
+            or "effective_detector_configs" in cmp.first_divergence.field)
 
 
 def test_r6_observation_identity_fields_recorded_on_accept():
-    """R6: cycle evidence carries full observation identity + payload."""
+    """R6: cycle evidence carries full observation identity + payload with values."""
     candles = _candles(12)
     e0 = candles[5].epoch
-    obs = _obs("structure_break", e0, variant="bos")
-    # enrich identity fields
-    obs = type(obs)(
-        **{
-            **{f.name: getattr(obs, f.name) for f in obs.__dataclass_fields__.values()},  # type: ignore[attr-defined]
-        }
-    ) if False else obs
-    script = {e0: [obs]}
-    raw = json.loads((FIXTURES_8A / "phase8a_completion.json").read_text())
-    # use a simple expression requiring structure_break only via invalidation path
-    # Prefer direct accept via any setup that matches - use phase8a completion's first step indirectly
-    # by injecting both steps on consecutive bars.
     e1 = candles[6].epoch
-    script = {
-        e0: [_obs("structure_break", e0, variant="bos")],
-        e1: [_obs("zone_interaction", e1, variant="rejection")],
-    }
+    o0 = Observation(
+        id=f"structure_break_bos_{e0}",
+        type="structure_break",
+        symbol=SYMBOL,
+        timeframe=TF,
+        candle_epoch=e0,
+        event_time=e0,
+        confirmed_at=e0,
+        detected_at=float(e0),
+        developing=False,
+        variant="bos",
+        detector_id="scripted",
+        detector_config_id="scripted_cfg_v1",
+        payload={"step": "arm"},
+    )
+    o1 = Observation(
+        id=f"zone_interaction_rejection_{e1}",
+        type="zone_interaction",
+        symbol=SYMBOL,
+        timeframe=TF,
+        candle_epoch=e1,
+        event_time=e1,
+        confirmed_at=e1,
+        detected_at=float(e1),
+        developing=False,
+        variant="rejection",
+        detector_id="scripted",
+        detector_config_id="scripted_cfg_v1",
+        payload={"step": "trigger"},
+    )
+    script = {e0: [o0], e1: [o1]}
+    raw = json.loads((FIXTURES_8A / "phase8a_completion.json").read_text())
     setup = parse_setup(raw)
     r = run_replay(
         ReplayRunConfig(
@@ -489,25 +506,38 @@ def test_r6_observation_identity_fields_recorded_on_accept():
             arm_count=6,
         )
     )
-    # Find a cycle with newly accepted observations
-    found = False
     required_keys = {
         "id", "type", "symbol", "timeframe", "variant", "event_time",
         "confirmed_at", "candle_epoch", "detected_at", "detector_id",
         "detector_config_id", "developing", "payload",
     }
+    accepted: list[dict] = []
+    emitted: list[dict] = []
     for rec in r.cycles:
-        for entry in rec.newly_accepted_observations:
-            found = True
-            assert required_keys <= set(entry.keys()), entry.keys()
-            assert entry["id"]
-            assert entry["type"]
-            assert entry["symbol"] == SYMBOL
-            assert entry["timeframe"] == TF
-            assert isinstance(entry["payload"], dict)
-        for entry in rec.emitted_observations:
-            assert required_keys <= set(entry.keys()), entry.keys()
-    assert found, "expected at least one newly accepted observation in cycle evidence"
+        accepted.extend(rec.newly_accepted_observations)
+        emitted.extend(rec.emitted_observations)
+    assert accepted, "expected newly accepted observations"
+    for entry in accepted + emitted:
+        assert required_keys <= set(entry.keys()), entry.keys()
+        assert entry["developing"] is False
+        assert entry["symbol"] == SYMBOL
+        assert entry["timeframe"] == TF
+        assert entry["event_time"] is not None
+        assert entry["confirmed_at"] is not None
+        assert entry["confirmed_at"] >= entry["event_time"]
+        assert entry["candle_epoch"] == entry["event_time"]
+        assert entry["detector_id"] == "scripted"
+        assert entry["detector_config_id"] == "scripted_cfg_v1"
+        assert isinstance(entry["payload"], dict)
+        assert entry["payload"]  # non-empty content
+    # Specific values for the two scripted observations
+    by_type = {e["type"]: e for e in accepted}
+    assert by_type["structure_break"]["variant"] == "bos"
+    assert by_type["structure_break"]["payload"] == {"step": "arm"}
+    assert by_type["zone_interaction"]["variant"] == "rejection"
+    assert by_type["zone_interaction"]["payload"] == {"step": "trigger"}
+    # Emitted and accepted are tracked as distinct sequences on the cycle
+    assert any(rec.emitted_observations for rec in r.cycles)
 
 
 def test_r6_identity_field_difference_visible_in_cycle_evidence():
@@ -561,4 +591,114 @@ def test_r6_identity_field_difference_visible_in_cycle_evidence():
     assert a_entries[0]["detector_id"] != b_entries[0]["detector_id"]
     assert a_entries[0]["payload"] != b_entries[0]["payload"]
     assert a_entries[0]["id"] != b_entries[0]["id"]
+
+
+def test_c4_confirm_lag_changes_closed_visibility():
+    """Controlled timeline: lag 0/1/3 change which bars are closed under mark_closed_by_lag."""
+    from cpab.market.validation import mark_closed_by_lag
+
+    # 5 bars, 60s step. Server time fixed so lag controls the open/closed boundary.
+    bars = [
+        make_candle(SYMBOL, TF, START + i * TF_SEC, 100.0, 101.0, 99.0, 100.5, is_closed=False)
+        for i in range(5)
+    ]
+    # Latest bar epoch + 1 full bar duration; lag*granularity further delays closure of recent bars.
+    server = START + 4 * TF_SEC + TF_SEC  # just after last bar open
+
+    def closed_epochs(lag: int) -> tuple[int, ...]:
+        marked = mark_closed_by_lag(bars, TF_SEC, server, lag)
+        return tuple(c.epoch for c in marked if c.is_closed)
+
+    e0 = closed_epochs(0)
+    e1 = closed_epochs(1)
+    e3 = closed_epochs(3)
+    # Higher lag withholds more recent bars
+    assert len(e0) >= len(e1) >= len(e3)
+    assert e0 != e3
+    # lag 1 is production-default path: not identical to lag 0 in this timeline
+    assert e0 != e1
+
+
+def test_c4_positive_parity_at_production_default_lag_1():
+    """A10 positive parity at production default confirm_lag_bars=1 when configs match."""
+    candles = _candles(12)
+    raw = json.loads((FIXTURES_8A / "phase8a_completion.json").read_text())
+    setup = parse_setup(raw)
+    e0 = candles[5].epoch
+    e1 = candles[6].epoch
+    script = {
+        e0: [_obs("structure_break", e0, variant="bos")],
+        e1: [_obs("zone_interaction", e1, variant="rejection")],
+    }
+    CAP, LAG = 500, 1
+    # Replay annotates the same lag/cache so effective-input knobs match.
+    # Candle series is pre-closed; lag=1 with server_time advanced still yields
+    # the full closed set for this fixture (verified via matching epochs).
+    replay = run_replay(
+        ReplayRunConfig(
+            setups=[setup],
+            detectors=[ScriptedDetector(script)],
+            symbol=SYMBOL,
+            timeframe=TF,
+            timeframe_seconds=TF_SEC,
+            candles=candles,
+            arm_count=6,
+            record_confirm_lag_bars=LAG,
+            record_cache_max_size=CAP,
+            record_htf_source=None,
+        )
+    )
+    live = run_live_style(
+        LiveStyleConfig(
+            setups=[setup],
+            detectors=[ScriptedDetector(script)],
+            symbol=SYMBOL,
+            timeframe=TF,
+            timeframe_seconds=TF_SEC,
+            candles=candles,
+            arm_count=6,
+            cache_max_size=CAP,
+            confirm_lag_bars=LAG,
+        )
+    )
+    for a, b in zip(replay.cycles, live.cycles):
+        assert a.effective_candle_epochs == b.effective_candle_epochs
+    cmp = compare_replay_runs(replay, live, setup_ids=[setup.setup_id])
+    assert cmp.matching and not cmp.input_divergence, cmp.to_dict()
+
+
+def test_c3_lifecycle_calls_zero_when_evaluation_blocked(monkeypatch):
+    """Blocked recovery cycle must report lifecycle_calls_per_cycle == 0."""
+    candles = _candles(10)
+    calls = {"n": 0}
+    from cpab.conditions import lifecycle as lc_mod
+
+    real_eval = lc_mod.SetupLifecycleEvaluator.evaluate
+
+    def spy_eval(self, *a, **k):
+        calls["n"] += 1
+        return real_eval(self, *a, **k)
+
+    monkeypatch.setattr(lc_mod.SetupLifecycleEvaluator, "evaluate", spy_eval)
+
+    # Fault makes series unhealthy → evaluation blocked on that cycle
+    r = run_live_style(
+        LiveStyleConfig(
+            setups=[],
+            detectors=[EngulfingDetector()],
+            symbol=SYMBOL,
+            timeframe=TF,
+            timeframe_seconds=TF_SEC,
+            candles=candles,
+            arm_count=5,
+            confirm_lag_bars=1,
+            cache_max_size=100,
+            fault_schedule={6: {"series_healthy": False}},
+        )
+    )
+    assert r.lifecycle_calls_per_cycle
+    # Find blocked cycles in records
+    for rec, lc in zip(r.cycles, r.lifecycle_calls_per_cycle):
+        if rec.evaluation_blocked:
+            assert lc == 0, (rec.cycle_index, lc, rec.evaluation_blocked)
 
