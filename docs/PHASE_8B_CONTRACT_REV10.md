@@ -1,6 +1,6 @@
 # Phase 8B — R1 ratification addendum (operative as Revision 10)
 
-Status: **OPERATIVE**. Owner formally approved R1 on 2026-11-05 as a narrow amendment to Rev8. This document is the consolidated operative authority statement for Phase 8B. It does not authorize runtime, test, detector, lifecycle, or configuration changes.
+Status: **OPERATIVE**. Owner formally approved R1 on **2026-11-06 (Africa/Lagos)** (2026-11-05 UTC) as a narrow amendment to Rev8. This document is the consolidated operative authority statement for Phase 8B. It does not authorize runtime, test, detector, lifecycle, or configuration changes.
 
 Repository reference reviewed: `main` at `3e07dd3c84a7112ca08bd4741ce26ffc17a6e2be`.
 
@@ -9,13 +9,13 @@ Repository reference reviewed: `main` at `3e07dd3c84a7112ca08bd4741ce26ffc17a6e2
 | Document | Role | Identity |
 |---|---|---|
 | Rev8 | Operative baseline (historical record, unchanged) | `docs/PHASE_8B_CONTRACT_REV8.md`, blob `640f4e6b4c26f6f425d910c5a696dc3e6d5cc2f0` |
-| R1 | Approved narrow amendment to Rev8 for the readiness-blocked fault class only | Approved 2026-11-05 |
+| R1 | Approved narrow amendment to Rev8 for the readiness-blocked fault class only | Approved 2026-11-06 (Africa/Lagos); 2026-11-05 UTC |
 | Rev9 | Historical record of the implemented R1 overlay (unchanged) | `docs/PHASE_8B_CONTRACT_REV9.md`, blob `91a0b88addbc3fdf88281ec569b0cec7f6c06742` |
 | **Rev10** | **Operative ratification addendum** (this file) | `docs/PHASE_8B_CONTRACT_REV10.md` |
 
 Relationship:
 
-- **Rev8** remains the operative baseline text for all rules not amended by R1.
+- **Rev8** remains the operative baseline text for all rules not amended by R1. The Rev8 file itself is unchanged. Its original header still reads “REVIEW DRAFT” / “proposed for review”; that wording is **historical metadata only**. The owner’s explicit confirmation of Rev8 as the operative baseline, together with this formal R1 ratification, **supersedes** that historical draft-status label for the operative Phase 8B acceptance baseline. Do not rewrite Rev8 to change its historical header.
 - **R1** is approved **only** for the readiness-blocked fault class. It does not amend unhealthy-data or missing-candle timing.
 - **Rev9** is preserved as the historical document that first recorded the implemented R1 overlay. Its historical contents are not silently rewritten.
 - **Rev10** is the formal ratification that makes the operative relationship explicit. The technical body of the Phase 8B contract remains the Rev9 text (Rev8 + R1 overlay) as recorded at the blob identity above; this addendum supplies authority, provenance, R1 exact scope, and mandatory-acceptance restatements.
@@ -57,9 +57,9 @@ Exact source identities used for this ratification:
 - Rev8: `docs/PHASE_8B_CONTRACT_REV8.md`, blob `640f4e6b4c26f6f425d910c5a696dc3e6d5cc2f0`
 - Rev9: `docs/PHASE_8B_CONTRACT_REV9.md`, blob `91a0b88addbc3fdf88281ec569b0cec7f6c06742`
 - Repository reference reviewed: `main` at `3e07dd3c84a7112ca08bd4741ce26ffc17a6e2be`
-- Ratification date: **2026-11-05**
+- Ratification date: **2026-11-06 (Africa/Lagos)**; corresponding UTC date **2026-11-05 UTC**
 - Independent comparison: Rev8 vs Rev9 at the repository reference above (blob SHAs as listed). No claim is made that any unavailable historical draft (including any prior "Rev10") was reviewed as a source text for this ratification.
-- Reviewer identity for this documentation reconciliation: independent documentation pass against the repository reference above; owner approval of R1 dated 2026-11-05.
+- Reviewer identity for this documentation reconciliation: independent documentation pass against the repository reference above; owner approval of R1 dated 2026-11-06 (Africa/Lagos).
 
 **A15 evidence-status enum provenance (correction):** all four statuses — `not_run`, `stub_only`, `real_env_passed`, `real_env_failed` — are already present in **Rev8** (section 6 programmatic-generation condition and A15). They are **not** newly proposed in later revisions. Cite Rev8 as the source of the enum.
 

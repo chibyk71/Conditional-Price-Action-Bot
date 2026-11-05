@@ -2,7 +2,7 @@
 
 Contract (operative): `docs/PHASE_8B_CONTRACT_REV10.md` (Revision 10, R1-ratified consolidation of Rev8 + readiness-blocked amendment).
 Historical records (unchanged): `docs/PHASE_8B_CONTRACT_REV8.md` (blob `640f4e6b4c26f6f425d910c5a696dc3e6d5cc2f0`); `docs/PHASE_8B_CONTRACT_REV9.md` (blob `91a0b88addbc3fdf88281ec569b0cec7f6c06742`, content SHA-256 `967bcd1150a02bd22c61b84a523a806add8ec90e1c4b302ff1ede513d4b7ab87`).
-Repository reference for ratification: `main` at `3e07dd3c84a7112ca08bd4741ce26ffc17a6e2be` (2026-11-05).
+Repository reference for ratification: `main` at `3e07dd3c84a7112ca08bd4741ce26ffc17a6e2be`. Ratification date: 2026-11-06 (Africa/Lagos); 2026-11-05 UTC.
 
 ## Scope
 
