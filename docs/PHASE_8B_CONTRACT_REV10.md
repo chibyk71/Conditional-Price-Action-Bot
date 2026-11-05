@@ -1,6 +1,6 @@
-# Phase 8B — Reconciled contract and acceptance criteria (OPERATIVE revision 10: R1 ratification of the readiness-blocked fault class over Rev8; Rev9 preserved as the historical implemented-R1 overlay record)
+# Phase 8B — R1 ratification addendum (operative as Revision 10)
 
-Status: **OPERATIVE**. Owner formally approved R1 on 2026-11-05 as a narrow amendment to Rev8. This revision 10 is the consolidated operative document. It does not authorize runtime, test, detector, lifecycle, or configuration changes.
+Status: **OPERATIVE**. Owner formally approved R1 on 2026-11-05 as a narrow amendment to Rev8. This document is the consolidated operative authority statement for Phase 8B. It does not authorize runtime, test, detector, lifecycle, or configuration changes.
 
 Repository reference reviewed: `main` at `3e07dd3c84a7112ca08bd4741ce26ffc17a6e2be`.
 
@@ -11,14 +11,14 @@ Repository reference reviewed: `main` at `3e07dd3c84a7112ca08bd4741ce26ffc17a6e2
 | Rev8 | Operative baseline (historical record, unchanged) | `docs/PHASE_8B_CONTRACT_REV8.md`, blob `640f4e6b4c26f6f425d910c5a696dc3e6d5cc2f0` |
 | R1 | Approved narrow amendment to Rev8 for the readiness-blocked fault class only | Approved 2026-11-05 |
 | Rev9 | Historical record of the implemented R1 overlay (unchanged) | `docs/PHASE_8B_CONTRACT_REV9.md`, blob `91a0b88addbc3fdf88281ec569b0cec7f6c06742` |
-| **Rev10** | **Operative consolidated document** (this file) | `docs/PHASE_8B_CONTRACT_REV10.md` |
+| **Rev10** | **Operative ratification addendum** (this file) | `docs/PHASE_8B_CONTRACT_REV10.md` |
 
 Relationship:
 
 - **Rev8** remains the operative baseline text for all rules not amended by R1.
 - **R1** is approved **only** for the readiness-blocked fault class. It does not amend unhealthy-data or missing-candle timing.
 - **Rev9** is preserved as the historical document that first recorded the implemented R1 overlay. Its historical contents are not silently rewritten.
-- **Rev10** consolidates Rev8 + approved R1 into the single operative contract and records provenance and ratification explicitly.
+- **Rev10** is the formal ratification that makes the operative relationship explicit. The technical body of the Phase 8B contract remains the Rev9 text (Rev8 + R1 overlay) as recorded at the blob identity above; this addendum supplies authority, provenance, R1 exact scope, and mandatory-acceptance restatements.
 
 Do not rewrite the historical contents of Rev8 or Rev9. Do not treat this document as authorization to change the runtime recovery state machine.
 
@@ -38,7 +38,7 @@ Explicitly preserved from Rev8 (unchanged by R1):
 
 R1 does **not** change the runtime recovery state machine. Reporting and acceptance windows for readiness-blocked scenarios are the only amendment.
 
-Concrete readiness-class bookkeeping (from the implemented overlay):
+Concrete readiness-class bookkeeping (from the implemented overlay recorded in Rev9):
 
 - Injected fault interval remains **[s, r−1]** as for other classes.
 - Cycle **r** is the additional engine-blocked RECOVERING cycle (lifecycle not called).
@@ -47,6 +47,8 @@ Concrete readiness-class bookkeeping (from the implemented overlay):
 - First continuity diagnostic **j = r+1**; STALLED classified at **r+2**.
 - Check window **r+1…E_rb** with **E_rb = max(r+5, t+2)**.
 - Per-cycle readiness sequence (READY → DEGRADED → … → RECOVERING → READY) is recorded and asserted.
+
+Readiness-class window table and scenario bookkeeping remain as stated in Rev9 section 6 (R1 overlay) and A13.
 
 ## Provenance and review boundary
 
@@ -73,7 +75,16 @@ The following rules remain mandatory and non-excludable under this operative doc
 - All mandatory **A6** fixture cases and all **24** stall-matrix scenarios must pass in the **same** verified acceptance run.
 - **Do not claim A15 has passed.** No durable A15 run manifest has yet been established at ratification.
 
-## Body of the operative contract
+## Incorporation by reference
 
-The sections below are the operative technical content: Rev8 baseline as amended by the R1 overlay for readiness-blocked faults (as previously recorded in Rev9 sections 3, 6 stall rule, scenario table, and A13). Status labels in the body that pre-date this ratification (for example "PROPOSED" on acceptance criteria) are retained as historical wording from the source text; operative authority for the readiness-blocked timing is the R1 amendment above.
+Operative technical requirements for Phase 8B (fixtures, STALLED reporting, replay/parity requirements, load-time validation, acceptance criteria A1–A15, exclusions, and open/deferred items) are those recorded in:
 
+- `docs/PHASE_8B_CONTRACT_REV9.md` (blob `91a0b88addbc3fdf88281ec569b0cec7f6c06742`), which is Rev8 plus the R1 readiness-blocked overlay,
+
+as constrained by this addendum. In case of conflict on readiness-blocked timing, the R1 exact-scope section of this addendum controls. In case of conflict on unhealthy-data or missing-candle timing, Rev8 controls. Rev8 and Rev9 files remain intact historical records.
+
+Pointers:
+
+- Summary index: `docs/PHASE8B_REPLAY_PARITY.md` (updated to cite this operative document).
+- Historical baseline: `docs/PHASE_8B_CONTRACT_REV8.md`.
+- Historical R1 overlay record: `docs/PHASE_8B_CONTRACT_REV9.md`.
