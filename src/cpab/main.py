@@ -9,12 +9,14 @@ import sys
 from pathlib import Path
 
 from cpab.adapters.deriv_ws import DerivWebSocketAdapter
-from cpab.config import conditions_from_config, load_config, setups_from_config
+from cpab.config import conditions_from_config, database_path_from_config, load_config, setups_from_config
 from cpab.core.engine import ConditionEngine
 from cpab.detectors.engulfing import EngulfingDetector
 from cpab.logging_setup import get_logger, setup_logging
 from cpab.market.readiness import ReadinessManager
 from cpab.market.service import MarketDataService
+from cpab.models import Signal
+from cpab.storage.store import SignalStore
 
 logger = get_logger("cpab.main")
 
@@ -52,11 +54,34 @@ async def run(config_path: str, once: bool = False) -> int:
         market, detectors, conditions, readiness, setups=setups
     )
 
+    # Resolve the storage database path (§17.2) and open the persistence
+    # consumer. Relative paths resolve against the config file's parent dir.
+    db_path = database_path_from_config(cfg, config_path)
+    store = SignalStore(db_path)
+    store.open()
+    logger.info("Signal store open at %s", db_path)
+
     stop = asyncio.Event()
+    persisted_batch: list[Signal] = []
 
     def _handle_sig(*_args):
         logger.info("Shutdown signal received")
         stop.set()
+
+    def process_signals(signals: list[Signal]) -> None:
+        """Persistence consumer at the signal-output boundary.
+
+        The same consumer is used in one-shot and continuous modes. The
+        returned batch is retained in memory until committed to the store;
+        evaluate_once() is not called again while a batch remains unpersisted.
+        """
+        nonlocal persisted_batch
+        if signals:
+            persisted_batch = list(signals)
+            store.save_signals(persisted_batch)  # commit before releasing
+            persisted_batch = []
+        for sig in signals:
+            logger.info("Signal: %s", sig.to_dict())
 
     loop = asyncio.get_running_loop()
     for s in (signal.SIGINT, signal.SIGTERM):
@@ -70,16 +95,14 @@ async def run(config_path: str, once: bool = False) -> int:
         await market.initialize()
         if once:
             signals = engine.evaluate_once()
-            for sig in signals:
-                logger.info("Signal: %s", sig.to_dict())
+            process_signals(signals)
             return 0
 
         await market.start_polling()
         logger.info("Bot running; readiness=%s", readiness.snapshot())
         while not stop.is_set():
             signals = engine.evaluate_once()
-            for sig in signals:
-                logger.info("Signal: %s", sig.to_dict())
+            process_signals(signals)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=market.poll_interval_sec)
             except asyncio.TimeoutError:
@@ -88,6 +111,7 @@ async def run(config_path: str, once: bool = False) -> int:
         logger.exception("Fatal error: %s", e)
         return 1
     finally:
+        store.close()
         await market.stop_polling()
         await adapter.close()
         logger.info("Shutdown complete")

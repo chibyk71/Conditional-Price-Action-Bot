@@ -35,6 +35,11 @@ logging:
   level: INFO
   format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
+# SQLite signal store path (sole authoritative signal store, §17.1 / §17.2).
+# Relative paths resolve against the parent directory of this config file.
+storage:
+  database_path: "../data/cpab_signals.sqlite3"
+
 # Provisional example condition (not an approved trading strategy).
 # Detects a simple bullish engulfing observation on 1m and emits a signal
 # when the observation is present on a completed candle.

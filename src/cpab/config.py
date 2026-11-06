@@ -10,6 +10,7 @@ import yaml
 from cpab.conditions.schema import SetupDef
 from cpab.conditions.validation import SetupValidationError, parse_setups
 from cpab.models import ConditionDef
+from cpab.storage.path import ConfigurationError, resolve_database_path
 
 
 def load_config(path: str | Path) -> dict[str, Any]:
@@ -17,6 +18,18 @@ def load_config(path: str | Path) -> dict[str, Any]:
     with path.open() as f:
         data = yaml.safe_load(f) or {}
     return data
+
+
+def database_path_from_config(
+    cfg: dict[str, Any], config_path: str | Path
+) -> Path:
+    """Resolve the ``storage.database_path`` from configuration.
+
+    Delegates to :func:`cpab.storage.path.resolve_database_path`. Missing,
+    empty, null, or non-string values raise ``ConfigurationError`` with no
+    fallback path.
+    """
+    return resolve_database_path(cfg, config_path)
 
 
 def conditions_from_config(cfg: dict[str, Any]) -> list[ConditionDef]:
